@@ -23,6 +23,11 @@ import (
 // built binary are expected to be started from.
 const transcribeWorkerScript = "scripts/transcribe_worker.py"
 
+// newDownloader is a variable so tests can point the downloader at fake
+// servers without touching the network; production always uses the real
+// constructor.
+var newDownloader = pipeline.NewDownloader
+
 func newDownloadCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "download",
@@ -41,6 +46,10 @@ func newDownloadCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			source, err := cmd.Flags().GetString("source")
+			if err != nil {
+				return err
+			}
 			formats, err := parseFormats(format)
 			if err != nil {
 				return err
@@ -50,13 +59,14 @@ func newDownloadCmd() *cobra.Command {
 				return err
 			}
 			defer rt.close()
-			_, err = rt.download(cmd.Context(), cmd.OutOrStdout(), lang, formats, transcribe, nil)
+			_, err = rt.download(cmd.Context(), cmd.OutOrStdout(), lang, formats, transcribe, source, nil)
 			return err
 		},
 	}
 	cmd.Flags().String("lang", "", "字幕语言（如 zh、en），空则自动选择")
 	cmd.Flags().String("format", "srt", "落盘格式，逗号分隔：srt,txt,md,json")
 	cmd.Flags().Bool("transcribe", false, "为无字幕视频启用本地 ASR（v1 尚无音频源，会如实提示跳过）")
+	cmd.Flags().String("source", "", "只下载该来源（source_key）的可下载字幕，空则处理全部")
 	return cmd
 }
 
@@ -68,7 +78,7 @@ type downloadStats struct {
 	Failed  int
 }
 
-func (r *runtime) download(ctx context.Context, out io.Writer, lang string, formats []string, transcribe bool, onProgress func(done, total int)) (downloadStats, error) {
+func (r *runtime) download(ctx context.Context, out io.Writer, lang string, formats []string, transcribe bool, source string, onProgress func(done, total int)) (downloadStats, error) {
 	var stats downloadStats
 	st, err := r.store()
 	if err != nil {
@@ -83,7 +93,7 @@ func (r *runtime) download(ctx context.Context, out io.Writer, lang string, form
 		defer backend.Close()
 		fmt.Fprintf(out, "本地 ASR 后端：%s（Python=%s，脚本=%s）。\n",
 			backend.Name(), r.cfg.PythonPath, transcribeWorkerScript)
-		noSubtitle, err := st.ListVideos(store.StateNoSubtitle)
+		noSubtitle, err := st.ListVideosFiltered(store.StateNoSubtitle, source)
 		if err != nil {
 			return stats, err
 		}
@@ -93,7 +103,7 @@ func (r *runtime) download(ctx context.Context, out io.Writer, lang string, form
 		}
 	}
 
-	videos, err := st.ListVideos(store.StateDownloadable)
+	videos, err := st.ListVideosFiltered(store.StateDownloadable, source)
 	if err != nil {
 		return stats, err
 	}
@@ -117,9 +127,9 @@ func (r *runtime) download(ctx context.Context, out io.Writer, lang string, form
 	emit(0, stats.Total)
 	tick := newProgressEmitter(stats.Total, onProgress)
 	var doneCount int64
-	en := pipeline.NewEnumerator(client)
+	en := newEnumerator(client)
 	dir := r.subtitleDir()
-	dl := pipeline.NewDownloader(client, st, en, dir)
+	dl := newDownloader(client, st, en, dir)
 
 	results := pipeline.Run(ctx, videos, r.cfg.Concurrency, func(ctx context.Context, v store.Video) (*ir.Document, error) {
 		doc, err := dl.FetchSubtitle(ctx, v, lang)

@@ -1,6 +1,9 @@
 package store
 
-import "database/sql"
+import (
+	"database/sql"
+	"strings"
+)
 
 type Video struct {
 	ID         int64
@@ -62,6 +65,77 @@ func (s *Store) ListVideosBySource(source string) ([]Video, error) {
 		return nil, err
 	}
 	return scanVideos(rows)
+}
+
+// ListVideosFiltered returns the rows matching the optional state and source_key
+// filters (an empty filter matches every row), ordered by id, with zero rows
+// normalized to a non-nil slice. It backs the paged /api/videos endpoint and the
+// source-scoped CLI operations, so a caller never has to build SQL itself.
+func (s *Store) ListVideosFiltered(state, source string) ([]Video, error) {
+	where, args := videoFilter(state, source)
+	rows, err := s.db.Query(
+		`SELECT id,bvid,cid,aid,author,title,pubdate,duration,page_index,part,is_charging,state,lang,source_key FROM videos`+where+` ORDER BY id`,
+		args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanVideos(rows)
+}
+
+// CountVideos returns how many rows match the same optional state/source_key
+// filters as ListVideosFiltered. It is the total half of a paged response, so a
+// caller can report the full size without materializing every row.
+func (s *Store) CountVideos(state, source string) (int, error) {
+	where, args := videoFilter(state, source)
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM videos`+where, args...).Scan(&n)
+	return n, err
+}
+
+// DeleteAllVideos removes every row from videos and transcripts in one
+// transaction and reports how many videos were deleted. Transcripts are cleared
+// first so a partial failure cannot leave orphaned subtitle rows (no foreign key
+// enforces the link).
+func (s *Store) DeleteAllVideos() (int64, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM transcripts`); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(`DELETE FROM videos`)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// videoFilter builds the shared optional WHERE clause for the state and
+// source_key filters, so the list and count queries cannot drift.
+func videoFilter(state, source string) (string, []any) {
+	var clauses []string
+	var args []any
+	if state != "" {
+		clauses = append(clauses, "state=?")
+		args = append(args, state)
+	}
+	if source != "" {
+		clauses = append(clauses, "source_key=?")
+		args = append(args, source)
+	}
+	if len(clauses) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(clauses, " AND "), args
 }
 
 // scanVideos drains a videos query into a slice, normalizing the zero-row case

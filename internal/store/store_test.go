@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -178,6 +179,146 @@ func TestListVideosBySource(t *testing.T) {
 	}
 	if len(empty) != 0 {
 		t.Fatalf("want 0 rows, got %d", len(empty))
+	}
+}
+
+func TestListVideosFilteredCombinations(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	rows := []Video{
+		{Bvid: "BV1", Cid: 1, SourceKey: "111", State: StatePending},
+		{Bvid: "BV2", Cid: 1, SourceKey: "222", State: StatePending},
+		{Bvid: "BV3", Cid: 1, SourceKey: "111", State: StateFetched},
+		{Bvid: "BV4", Cid: 1, SourceKey: "111", State: StatePending},
+	}
+	for i := range rows {
+		if _, err := s.UpsertVideo(&rows[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tests := []struct {
+		name   string
+		state  string
+		source string
+		want   []string
+	}{
+		{name: "no filter", want: []string{"BV1", "BV2", "BV3", "BV4"}},
+		{name: "state only", state: StatePending, want: []string{"BV1", "BV2", "BV4"}},
+		{name: "source only", source: "111", want: []string{"BV1", "BV3", "BV4"}},
+		{name: "both", state: StatePending, source: "111", want: []string{"BV1", "BV4"}},
+		{name: "both with no match", state: StateFetched, source: "222", want: []string{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := s.ListVideosFiltered(tc.state, tc.source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got == nil {
+				t.Fatal("want non-nil empty slice")
+			}
+			var gotIds []string
+			for _, v := range got {
+				gotIds = append(gotIds, v.Bvid)
+			}
+			if strings.Join(gotIds, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("bvid order = %v, want %v", gotIds, tc.want)
+			}
+		})
+	}
+}
+
+func TestCountVideos(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	for _, v := range []Video{
+		{Bvid: "BV1", Cid: 1, SourceKey: "111", State: StatePending},
+		{Bvid: "BV2", Cid: 1, SourceKey: "111", State: StateFetched},
+		{Bvid: "BV3", Cid: 1, SourceKey: "222", State: StateFetched},
+	} {
+		v := v
+		if _, err := s.UpsertVideo(&v); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tests := []struct {
+		state  string
+		source string
+		want   int
+	}{
+		{want: 3},
+		{state: StateFetched, want: 2},
+		{source: "111", want: 2},
+		{state: StateFetched, source: "111", want: 1},
+		{state: StateExported, want: 0},
+	}
+	for _, tc := range tests {
+		got, err := s.CountVideos(tc.state, tc.source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != tc.want {
+			t.Errorf("CountVideos(%q,%q) = %d, want %d", tc.state, tc.source, got, tc.want)
+		}
+	}
+}
+
+func TestDeleteAllVideos(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	id, err := s.UpsertVideo(&Video{Bvid: "BV1", Cid: 1, State: StateFetched})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveTranscript(id, "bilibili", "zh-CN", `{"segments":[]}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpsertVideo(&Video{Bvid: "BV2", Cid: 2, State: StatePending}); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.DeleteAllVideos()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("deleted = %d, want 2", n)
+	}
+	left, err := s.ListVideos("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Fatalf("videos left after delete = %d, want 0", len(left))
+	}
+	if count, err := s.CountVideos("", ""); err != nil || count != 0 {
+		t.Fatalf("CountVideos after delete = %d, %v; want 0, nil", count, err)
+	}
+	if _, _, _, err := s.GetTranscript(id); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("transcript left after delete: err = %v, want sql.ErrNoRows", err)
+	}
+
+	// Deleting again must be a no-op that still reports zero, not an error.
+	n, err = s.DeleteAllVideos()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("second delete = %d, want 0", n)
 	}
 }
 

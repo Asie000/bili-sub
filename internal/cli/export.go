@@ -33,36 +33,50 @@ func newExportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			source, err := cmd.Flags().GetString("source")
+			if err != nil {
+				return err
+			}
 			rt, err := newRuntime(cmd)
 			if err != nil {
 				return err
 			}
 			defer rt.close()
-			_, err = rt.export(cmd.OutOrStdout(), cmd.ErrOrStderr(), formats, nil)
+			_, err = rt.export(cmd.OutOrStdout(), cmd.ErrOrStderr(), formats, source, nil)
 			return err
 		},
 	}
 	cmd.Flags().String("format", "srt,txt,json,md", "导出格式，逗号分隔：srt,txt,md,json")
+	cmd.Flags().String("source", "", "只导出该来源（source_key）的字幕，空则导出全部")
 	return cmd
 }
 
 // export packs the fetched/transcribed subtitles and returns the zip path (for
 // the HTTP /api/export response). out receives the summary line, warn the
 // per-video skip notices.
-func (r *runtime) export(out, warn io.Writer, formats []string, onProgress func(done, total int)) (string, error) {
+func (r *runtime) export(out, warn io.Writer, formats []string, source string, onProgress func(done, total int)) (string, error) {
 	st, err := r.store()
 	if err != nil {
 		return "", err
 	}
 	// transcribed is included so ASR output (Task 15) is exported too, even
-	// though nothing writes that state yet.
+	// though nothing writes that state yet. A video cannot be in both states at
+	// once, but the merge still dedupes by id so a future overlap cannot pack
+	// one video twice.
 	var videos []store.Video
+	seen := map[int64]bool{}
 	for _, state := range []string{store.StateFetched, store.StateTranscribed} {
-		list, err := st.ListVideos(state)
+		list, err := st.ListVideosFiltered(state, source)
 		if err != nil {
 			return "", err
 		}
-		videos = append(videos, list...)
+		for _, v := range list {
+			if seen[v.ID] {
+				continue
+			}
+			seen[v.ID] = true
+			videos = append(videos, v)
+		}
 	}
 	emit := func(done, total int) {
 		if onProgress != nil {

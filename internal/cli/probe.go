@@ -21,6 +21,14 @@ import (
 // (done == total) always goes through.
 const progressInterval = 200 * time.Millisecond
 
+// newEnumerator and newProber are variables so tests can point the probe
+// pipeline at fake servers; production always uses the real constructors. This
+// mirrors the newQRLoginClient seam in serve.go.
+var (
+	newEnumerator = pipeline.NewEnumerator
+	newProber     = pipeline.NewProber
+)
+
 // newProgressEmitter returns a per-item progress callback that forwards a tick
 // through emit, suppressing ticks that arrive within progressInterval of the
 // previous one. The first tick and any final tick (done == total) are always
@@ -45,20 +53,26 @@ func newProgressEmitter(total int, emit func(done, total int)) func(done int) {
 }
 
 func newProbeCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "probe <url>",
 		Short: "枚举来源并探测字幕可用性（不下载）",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			force, err := cmd.Flags().GetBool("force")
+			if err != nil {
+				return err
+			}
 			rt, err := newRuntime(cmd)
 			if err != nil {
 				return err
 			}
 			defer rt.close()
-			_, err = rt.probe(cmd.Context(), cmd.OutOrStdout(), args[0], "", nil)
+			_, err = rt.probe(cmd.Context(), cmd.OutOrStdout(), args[0], "", force, nil)
 			return err
 		},
 	}
+	cmd.Flags().Bool("force", false, "重新探测已完成的视频（fetched/transcribed/exported）")
+	return cmd
 }
 
 // probeStats is what one probe run learned about its source. Both the CLI
@@ -69,17 +83,20 @@ type probeStats struct {
 	NoSubtitle     int
 	ChargingLocked int
 	Failed         int
+	Skipped        int
 }
 
 // probeOutcome is what one worker learned about one video. err is carried in
 // the value (not as Run's error) so a per-video failure is distinguishable from
-// a cancelled run, which Run reports through Result.Err.
+// a cancelled run, which Run reports through Result.Err. skipped marks a video
+// that was already completed before this run and so was deliberately not probed.
 type probeOutcome struct {
-	result *pipeline.ProbeResult
-	err    error
+	result  *pipeline.ProbeResult
+	err     error
+	skipped bool
 }
 
-func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec string, onProgress func(done, total int)) (probeStats, error) {
+func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec string, force bool, onProgress func(done, total int)) (probeStats, error) {
 	var stats probeStats
 	var kind pipeline.SourceKind
 	var key string
@@ -101,7 +118,7 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 	if err != nil {
 		return stats, err
 	}
-	en := pipeline.NewEnumerator(client)
+	en := newEnumerator(client)
 
 	infos, err := collectVideos(ctx, en, kind, key)
 	if err != nil {
@@ -129,6 +146,26 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 	}
 	stats.Total = len(videos)
 
+	// A video already carried through download/transcribe/export must not be
+	// probed again: re-probing would overwrite its fetched state back to
+	// downloadable and (with it) discard the fact that its subtitle is stored.
+	// --force re-probes everything. The states are read back from the store
+	// after the upsert so a row that already existed keeps its persisted state
+	// (UpsertVideo never touches state on conflict).
+	completed := map[int64]string{}
+	if !force {
+		existing, err := st.ListVideosFiltered("", key)
+		if err != nil {
+			return stats, err
+		}
+		for _, v := range existing {
+			switch v.State {
+			case store.StateFetched, store.StateTranscribed, store.StateExported:
+				completed[v.ID] = v.State
+			}
+		}
+	}
+
 	// Report progress from the workers. The emitter is shared by every worker
 	// goroutine, so its throttle guard and the counter are synchronized; the
 	// callback itself runs outside the lock so a slow SSE broadcast cannot
@@ -139,8 +176,12 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 	}
 	tick := newProgressEmitter(stats.Total, onProgress)
 
-	prober := pipeline.NewProber(client, st, en)
+	prober := newProber(client, st, en)
 	outcomes := pipeline.Run(ctx, videos, r.cfg.Concurrency, func(ctx context.Context, v store.Video) (probeOutcome, error) {
+		if _, skip := completed[v.ID]; skip {
+			tick(int(atomic.AddInt64(&doneCount, 1)))
+			return probeOutcome{skipped: true}, nil
+		}
 		res, err := prober.ProbeVideo(ctx, v)
 		tick(int(atomic.AddInt64(&doneCount, 1)))
 		if err == nil {
@@ -159,6 +200,9 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 	stateFor := func(i int, v store.Video) string {
 		o := outcomes[i]
 		switch {
+		case o.Value.skipped:
+			stats.Skipped++
+			return "已完成"
 		case o.Value.result != nil && o.Value.result.ChargingLocked:
 			stats.ChargingLocked++
 			return "充电专属"
@@ -188,8 +232,8 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 	if err := writeVideosTable(out, videos, stateFor, langFor); err != nil {
 		return stats, err
 	}
-	fmt.Fprintf(out, "探测完成：共 %d，可下载 %d，无字幕 %d，充电锁定 %d，失败 %d\n",
-		stats.Total, stats.Downloadable, stats.NoSubtitle, stats.ChargingLocked, stats.Failed)
+	fmt.Fprintf(out, "探测完成：共 %d，可下载 %d，无字幕 %d，充电锁定 %d，失败 %d，已完成 %d\n",
+		stats.Total, stats.Downloadable, stats.NoSubtitle, stats.ChargingLocked, stats.Failed, stats.Skipped)
 	// The table shows only a 失败 marker, so print why each probe failed.
 	for i, o := range outcomes {
 		if o.Value.err != nil {

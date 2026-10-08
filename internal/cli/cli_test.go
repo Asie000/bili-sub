@@ -2,16 +2,23 @@ package cli
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"bilibili-sub/internal/bili"
 	"bilibili-sub/internal/ir"
+	"bilibili-sub/internal/pipeline"
 	"bilibili-sub/internal/store"
 )
 
@@ -509,4 +516,238 @@ func TestProgressEmitterNilEmitIsNoop(t *testing.T) {
 	tick(0)
 	tick(1)
 	tick(3)
+}
+
+// --- Task 23: scaling (paged list, source scoping, skip completed) ---
+
+// overrideEnumerator points the probe/download enumerator at a fake view server
+// for the duration of one test.
+func overrideEnumerator(t *testing.T, viewURL, navURL string) {
+	t.Helper()
+	prev := newEnumerator
+	newEnumerator = func(c *bili.Client) *pipeline.Enumerator {
+		en := pipeline.NewEnumerator(c)
+		en.ViewBaseURL = viewURL
+		en.NavURL = navURL
+		return en
+	}
+	t.Cleanup(func() { newEnumerator = prev })
+}
+
+// overrideProber points the prober's unsigned player endpoint at a fake server.
+func overrideProber(t *testing.T, playerV2URL string) {
+	t.Helper()
+	prev := newProber
+	newProber = func(c *bili.Client, st *store.Store, en *pipeline.Enumerator) *pipeline.Prober {
+		p := pipeline.NewProber(c, st, en)
+		p.PlayerV2URL = playerV2URL
+		return p
+	}
+	t.Cleanup(func() { newProber = prev })
+}
+
+// overrideDownloader points the downloader's unsigned player endpoint at a fake
+// server.
+func overrideDownloader(t *testing.T, playerV2URL string) {
+	t.Helper()
+	prev := newDownloader
+	newDownloader = func(c *bili.Client, st *store.Store, en *pipeline.Enumerator, outputDir string) *pipeline.Downloader {
+		d := pipeline.NewDownloader(c, st, en, outputDir)
+		d.PlayerV2URL = playerV2URL
+		return d
+	}
+	t.Cleanup(func() { newDownloader = prev })
+}
+
+// TestProbeSkipsCompletedVideos drives the real probe against a fake view server
+// with a seeded fetched row: the completed video must not be probed (no player
+// request), must be counted in stats.Skipped, and must keep its state. --force
+// then re-probes it.
+func TestProbeSkipsCompletedVideos(t *testing.T) {
+	const bvid = "BV1uv411q7Mv"
+	var playerRequests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/x/web-interface/view":
+			fmt.Fprintf(w, `{"code":0,"message":"0","data":{"bvid":%q,"cid":1001,"title":"视频","pubdate":1,"duration":10,"owner":{"mid":1,"name":"up"}}}`, bvid)
+		case "/x/player/v2":
+			atomic.AddInt32(&playerRequests, 1)
+			_, _ = io.WriteString(w, `{"code":0,"message":"0","data":{"subtitle":{"subtitles":[{"lan":"zh-CN","subtitle_url":"https://example.invalid/x.json"}]}}}`)
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	overrideEnumerator(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav")
+	overrideProber(t, srv.URL+"/x/player/v2")
+
+	rt := newTestRuntime(t)
+	defer rt.close()
+	st, err := rt.store()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	// A row the earlier pipeline already finished: same bvid/cid, source keyed
+	// exactly as probe will key it.
+	if _, err := st.UpsertVideo(&store.Video{Bvid: bvid, Cid: 1001, Title: "视频", State: store.StateFetched, SourceKey: bvid}); err != nil {
+		t.Fatalf("seed completed row: %v", err)
+	}
+
+	var out strings.Builder
+	stats, err := rt.probe(context.Background(), &out, bvid, "single", false, nil)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if stats.Total != 1 || stats.Skipped != 1 {
+		t.Fatalf("stats = %+v, want total=1 skipped=1", stats)
+	}
+	if n := atomic.LoadInt32(&playerRequests); n != 0 {
+		t.Fatalf("a completed video was probed: %d player requests", n)
+	}
+	if !strings.Contains(out.String(), "已完成") {
+		t.Errorf("output = %q, want the completed video shown as 已完成", out.String())
+	}
+	rows, err := st.ListVideosFiltered("", bvid)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].State != store.StateFetched {
+		t.Fatalf("rows = %+v, want the fetched state left untouched", rows)
+	}
+
+	// --force re-probes the same video and advances its state.
+	stats, err = rt.probe(context.Background(), io.Discard, bvid, "single", true, nil)
+	if err != nil {
+		t.Fatalf("probe --force: %v", err)
+	}
+	if stats.Skipped != 0 {
+		t.Fatalf("stats.Skipped = %d, want 0 with force", stats.Skipped)
+	}
+	if n := atomic.LoadInt32(&playerRequests); n == 0 {
+		t.Fatal("probe --force did not ask the player endpoint")
+	}
+	rows, err = st.ListVideosFiltered("", bvid)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].State != store.StateDownloadable {
+		t.Fatalf("rows = %+v, want state downloadable after force probe", rows)
+	}
+}
+
+// TestDownloadScopesToSource seeds downloadable rows in two sources and proves
+// download with a source only touches the named one: exactly one player request,
+// for the source's bvid, and the other source's row stays downloadable.
+func TestDownloadScopesToSource(t *testing.T) {
+	var mu sync.Mutex
+	var requested []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/x/player/v2":
+			mu.Lock()
+			requested = append(requested, r.URL.Query().Get("bvid"))
+			mu.Unlock()
+			fmt.Fprintf(w, `{"code":0,"message":"0","data":{"subtitle":{"subtitles":[{"lan":"zh-CN","subtitle_url":"http://%s/sub.json"}]}}}`, r.Host)
+		case "/sub.json":
+			_, _ = io.WriteString(w, `{"body":[{"from":0,"to":1,"content":"你好"}]}`)
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	overrideEnumerator(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav")
+	overrideDownloader(t, srv.URL+"/x/player/v2")
+
+	rt := newTestRuntime(t)
+	defer rt.close()
+	st, err := rt.store()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if _, err := st.UpsertVideo(&store.Video{Bvid: "BV1aaaa1111a", Cid: 1, Title: "源一", State: store.StateDownloadable, SourceKey: "111"}); err != nil {
+		t.Fatalf("seed source 111: %v", err)
+	}
+	if _, err := st.UpsertVideo(&store.Video{Bvid: "BV1bbbb2222b", Cid: 2, Title: "源二", State: store.StateDownloadable, SourceKey: "222"}); err != nil {
+		t.Fatalf("seed source 222: %v", err)
+	}
+
+	stats, err := rt.download(context.Background(), io.Discard, "", []string{"srt"}, false, "111", nil)
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if stats.Total != 1 || stats.Fetched != 1 {
+		t.Fatalf("stats = %+v, want total=1 fetched=1 (only source 111)", stats)
+	}
+	mu.Lock()
+	gotRequested := append([]string(nil), requested...)
+	mu.Unlock()
+	if len(gotRequested) != 1 || gotRequested[0] != "BV1aaaa1111a" {
+		t.Fatalf("player requests = %v, want only BV1aaaa1111a", gotRequested)
+	}
+
+	other, err := st.ListVideosFiltered("", "222")
+	if err != nil {
+		t.Fatalf("list source 222: %v", err)
+	}
+	if len(other) != 1 || other[0].State != store.StateDownloadable {
+		t.Fatalf("source 222 rows = %+v, want the untouched downloadable row", other)
+	}
+}
+
+// TestExportScopesToSource seeds fetched subtitles in two sources and proves
+// `export --source` packs only the named source's video.
+func TestExportScopesToSource(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BILI_DATA_DIR", dir)
+
+	st, err := store.Open(filepath.Join(dir, "bili_sub.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	seed := func(bvid, title, source string) {
+		t.Helper()
+		id, err := st.UpsertVideo(&store.Video{Bvid: bvid, Cid: 1, Title: title, State: store.StateFetched, PageIndex: 1, SourceKey: source})
+		if err != nil {
+			t.Fatalf("upsert %s: %v", bvid, err)
+		}
+		doc := ir.Document{Bvid: bvid, Cid: 1, Title: title, Lang: "zh-Hans",
+			Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "你好"}}}
+		blob, err := json.Marshal(doc)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", bvid, err)
+		}
+		if err := st.SaveTranscript(id, "bilibili", "zh-Hans", string(blob)); err != nil {
+			t.Fatalf("save transcript %s: %v", bvid, err)
+		}
+	}
+	seed("BV1aaaa1111a", "源一", "111")
+	seed("BV1bbbb2222b", "源二", "222")
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	if err := execute("export", "--format", "srt", "--source", "111"); err != nil {
+		t.Fatalf("export --source: %v", err)
+	}
+
+	zips, err := filepath.Glob(filepath.Join(dir, "exports", "*.zip"))
+	if err != nil {
+		t.Fatalf("glob exports: %v", err)
+	}
+	if len(zips) != 1 {
+		t.Fatalf("exported zips = %v, want exactly one", zips)
+	}
+	zr, err := zip.OpenReader(zips[0])
+	if err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	defer zr.Close()
+	if len(zr.File) != 1 {
+		t.Fatalf("zip entries = %d, want 1 (only source 111)", len(zr.File))
+	}
+	if !strings.Contains(zr.File[0].Name, "BV1aaaa1111a") {
+		t.Errorf("zip entry %q, want the source-111 video", zr.File[0].Name)
+	}
 }

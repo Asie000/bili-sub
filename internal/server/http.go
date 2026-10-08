@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -23,6 +24,17 @@ type ProbeSummary struct {
 	NoSubtitle     int `json:"no_subtitle"`
 	ChargingLocked int `json:"charging_locked"`
 	Failed         int `json:"failed"`
+	Skipped        int `json:"skipped"`
+}
+
+// VideoPage is one page of GET /api/videos. Items is always a non-nil slice so
+// an empty page marshals to `[]`, and Total is the number of rows matching the
+// filters regardless of offset/limit.
+type VideoPage struct {
+	Items  []store.Video `json:"items"`
+	Total  int           `json:"total"`
+	Offset int           `json:"offset"`
+	Limit  int           `json:"limit"`
 }
 
 // Progress is one progress tick for a long-running operation, streamed as an
@@ -63,9 +75,9 @@ type HandoffResponse struct {
 // panicking. Hub may be nil, in which case the server creates one.
 type Options struct {
 	Store       *store.Store
-	Probe       func(ctx context.Context, url, kind string, onProgress func(Progress)) (ProbeSummary, error)
-	Download    func(ctx context.Context, lang string, transcribe bool, onProgress func(Progress)) (DownloadSummary, error)
-	Export      func(ctx context.Context, formats []string, onProgress func(Progress)) (string, error)
+	Probe       func(ctx context.Context, url, kind string, force bool, onProgress func(Progress)) (ProbeSummary, error)
+	Download    func(ctx context.Context, lang string, transcribe bool, source string, onProgress func(Progress)) (DownloadSummary, error)
+	Export      func(ctx context.Context, formats []string, source string, onProgress func(Progress)) (string, error)
 	Login       func(sessdata, cookie string) error
 	LoginStatus func(ctx context.Context) (LoginState, error)
 	QRLogin     func(ctx context.Context) (string, error)
@@ -111,6 +123,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/probe", s.handleProbe)
 	mux.HandleFunc("POST /api/download", s.handleDownload)
 	mux.HandleFunc("POST /api/export", s.handleExport)
+	mux.HandleFunc("POST /api/reset", s.handleReset)
 	mux.HandleFunc("POST /api/login/sessdata", s.handleSessdata)
 	mux.HandleFunc("POST /api/handoff", s.handleHandoff)
 	mux.HandleFunc("GET /api/login/status", s.handleLoginStatus)
@@ -166,34 +179,91 @@ func withCORS(next http.Handler) http.Handler {
 	})
 }
 
-// handleVideos returns the stored videos. With a ?source= query it returns only
-// the rows belonging to that parsed source key, which is how the page scopes the
-// list to the source the user just probed; without it, every row. store.Video
-// has no JSON tags, so the embedded page reads the Go field names (Title,
-// Author, Pubdate, State, Lang, IsCharging, ...). Both store list methods
-// normalize zero rows to a non-nil slice, and the guard keeps the response `[]`
-// rather than `null`.
+// handleVideos returns one page of the stored videos. Optional state and source
+// query parameters filter the rows; offset/limit page through them. limit
+// defaults to 100 and is clamped to [1,500]; offset defaults to 0 and a negative
+// value is treated as 0. The response is a VideoPage whose items slice is never
+// null. store.Video has no JSON tags, so each item keeps the Go field names the
+// embedded page reads (Title, Author, Pubdate, State, Lang, IsCharging, ...).
 func (s *Server) handleVideos(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Store == nil {
 		writeError(w, http.StatusNotImplemented, "store 未配置")
 		return
 	}
-	source := strings.TrimSpace(r.URL.Query().Get("source"))
-	var videos []store.Video
-	var err error
-	if source != "" {
-		videos, err = s.opts.Store.ListVideosBySource(source)
-	} else {
-		videos, err = s.opts.Store.ListVideos("")
-	}
+	q := r.URL.Query()
+	state := strings.TrimSpace(q.Get("state"))
+	source := strings.TrimSpace(q.Get("source"))
+	offset := parseVideoOffset(q.Get("offset"))
+	limit := parseVideoLimit(q.Get("limit"))
+
+	total, err := s.opts.Store.CountVideos(state, source)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if videos == nil {
-		videos = []store.Video{}
+	videos, err := s.opts.Store.ListVideosFiltered(state, source)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
-	writeJSON(w, http.StatusOK, videos)
+	writeJSON(w, http.StatusOK, VideoPage{
+		Items:  pageItems(videos, offset, limit),
+		Total:  total,
+		Offset: offset,
+		Limit:  limit,
+	})
+}
+
+// videoPageDefaultLimit and videoPageMaxLimit bound GET /api/videos' page size,
+// so a request cannot ask the server to serialize an unbounded list.
+const (
+	videoPageDefaultLimit = 100
+	videoPageMaxLimit     = 500
+)
+
+// parseVideoLimit resolves ?limit, defaulting to 100 and clamping into
+// [1, videoPageMaxLimit]. A non-numeric value falls back to the default.
+func parseVideoLimit(raw string) int {
+	if raw == "" {
+		return videoPageDefaultLimit
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return videoPageDefaultLimit
+	}
+	if n < 1 {
+		return 1
+	}
+	if n > videoPageMaxLimit {
+		return videoPageMaxLimit
+	}
+	return n
+}
+
+// parseVideoOffset resolves ?offset, defaulting to 0; anything negative or
+// non-numeric is treated as 0.
+func parseVideoOffset(raw string) int {
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// pageItems slices one page out of the ordered rows, returning a non-nil empty
+// slice for an offset at or past the end so items still marshals to `[]`.
+func pageItems(videos []store.Video, offset, limit int) []store.Video {
+	if offset >= len(videos) {
+		return []store.Video{}
+	}
+	end := offset + limit
+	if end > len(videos) {
+		end = len(videos)
+	}
+	return videos[offset:end]
 }
 
 // handleStats counts the stored videos per state.
@@ -220,8 +290,9 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		URL  string `json:"url"`
-		Kind string `json:"kind"`
+		URL   string `json:"url"`
+		Kind  string `json:"kind"`
+		Force bool   `json:"force"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
@@ -254,7 +325,7 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 	onProgress := func(p Progress) {
 		s.eventHub().Broadcast(Event{Type: "progress", Data: p})
 	}
-	summary, err := s.opts.Probe(r.Context(), req.URL, req.Kind, onProgress)
+	summary, err := s.opts.Probe(r.Context(), req.URL, req.Kind, req.Force, onProgress)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -279,6 +350,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Lang       string `json:"lang"`
 		Transcribe bool   `json:"transcribe"`
+		Source     string `json:"source"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
@@ -287,7 +359,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	onProgress := func(p Progress) {
 		s.eventHub().Broadcast(Event{Type: "progress", Data: p})
 	}
-	summary, err := s.opts.Download(r.Context(), req.Lang, req.Transcribe, onProgress)
+	summary, err := s.opts.Download(r.Context(), req.Lang, req.Transcribe, req.Source, onProgress)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -303,6 +375,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Formats []string `json:"formats"`
+		Source  string   `json:"source"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
@@ -315,13 +388,41 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	onProgress := func(p Progress) {
 		s.eventHub().Broadcast(Event{Type: "progress", Data: p})
 	}
-	zipPath, err := s.opts.Export(r.Context(), req.Formats, onProgress)
+	zipPath, err := s.opts.Export(r.Context(), req.Formats, req.Source, onProgress)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	s.eventHub().Broadcast(Event{Type: "export", Data: map[string]string{"zip": zipPath}})
 	writeJSON(w, http.StatusOK, map[string]string{"zip": zipPath})
+}
+
+// handleReset clears every video and transcript row. It is destructive, so it
+// requires an explicit {"confirm":true} body; anything else is a 400. On success
+// it announces the new empty state over SSE so other open pages reload.
+func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
+	if s.opts.Store == nil {
+		writeError(w, http.StatusNotImplemented, "store 未配置")
+		return
+	}
+	var req struct {
+		Confirm bool `json:"confirm"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
+		return
+	}
+	if !req.Confirm {
+		writeError(w, http.StatusBadRequest, "reset 需要 confirm=true 确认")
+		return
+	}
+	deleted, err := s.opts.Store.DeleteAllVideos()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.eventHub().Broadcast(Event{Type: "reset", Data: map[string]int64{"deleted": deleted}})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})
 }
 
 // handleSessdata persists a pasted SESSDATA and/or a full browser Cookie. At

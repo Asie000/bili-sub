@@ -77,7 +77,7 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 	return server.Options{
 		Store: st,
 		Hub:   hub,
-		Probe: func(ctx context.Context, rawURL, kind string, onProgress func(server.Progress)) (server.ProbeSummary, error) {
+		Probe: func(ctx context.Context, rawURL, kind string, force bool, onProgress func(server.Progress)) (server.ProbeSummary, error) {
 			if !r.opMu.TryLock() {
 				return server.ProbeSummary{}, errOperationBusy
 			}
@@ -88,7 +88,7 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 					onProgress(server.Progress{Op: "probe", Done: done, Total: total})
 				}
 			}
-			stats, err := r.probe(ctx, io.Discard, rawURL, kind, progress)
+			stats, err := r.probe(ctx, io.Discard, rawURL, kind, force, progress)
 			if err != nil {
 				return server.ProbeSummary{}, err
 			}
@@ -98,9 +98,10 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 				NoSubtitle:     stats.NoSubtitle,
 				ChargingLocked: stats.ChargingLocked,
 				Failed:         stats.Failed,
+				Skipped:        stats.Skipped,
 			}, nil
 		},
-		Download: func(ctx context.Context, lang string, transcribe bool, onProgress func(server.Progress)) (server.DownloadSummary, error) {
+		Download: func(ctx context.Context, lang string, transcribe bool, source string, onProgress func(server.Progress)) (server.DownloadSummary, error) {
 			if !r.opMu.TryLock() {
 				return server.DownloadSummary{}, errOperationBusy
 			}
@@ -113,13 +114,13 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 			}
 			// The downloader owns the .srt; export renders the other formats
 			// from the stored IR, so only srt is written here.
-			stats, err := r.download(ctx, io.Discard, lang, []string{export.FormatSRT}, transcribe, progress)
+			stats, err := r.download(ctx, io.Discard, lang, []string{export.FormatSRT}, transcribe, source, progress)
 			if err != nil {
 				return server.DownloadSummary{}, err
 			}
 			return server.DownloadSummary{Fetched: stats.Fetched, Failed: stats.Failed}, nil
 		},
-		Export: func(_ context.Context, formats []string, onProgress func(server.Progress)) (string, error) {
+		Export: func(_ context.Context, formats []string, source string, onProgress func(server.Progress)) (string, error) {
 			if !r.opMu.TryLock() {
 				return "", errOperationBusy
 			}
@@ -130,7 +131,7 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 					onProgress(server.Progress{Op: "export", Done: done, Total: total})
 				}
 			}
-			return r.export(io.Discard, io.Discard, formats, progress)
+			return r.export(io.Discard, io.Discard, formats, source, progress)
 		},
 		Login:       r.saveSession,
 		LoginStatus: r.loginStatus,

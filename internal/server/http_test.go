@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,7 +57,7 @@ func serve(t *testing.T, s *Server, method, path, body string) *httptest.Respons
 	return rec
 }
 
-func TestVideosEndpointEmptyStoreIsEmptyArray(t *testing.T) {
+func TestVideosEndpointEmptyStoreHasEmptyItems(t *testing.T) {
 	s := newTestServer(t, Options{})
 
 	rec := serve(t, s, http.MethodGet, "/api/videos", "")
@@ -64,8 +65,21 @@ func TestVideosEndpointEmptyStoreIsEmptyArray(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200", rec.Code)
 	}
-	if got := rec.Body.String(); got != "[]" {
-		t.Fatalf("body = %q, want exactly [] (not null)", got)
+	if !strings.Contains(rec.Body.String(), `"items":[]`) {
+		t.Fatalf("body = %q, want items to be [] (not null)", rec.Body.String())
+	}
+	var got VideoPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if got.Items == nil {
+		t.Fatal("items must be a non-nil empty slice")
+	}
+	if len(got.Items) != 0 || got.Total != 0 {
+		t.Fatalf("page = %+v, want zero items and total", got)
+	}
+	if got.Offset != 0 || got.Limit != 100 {
+		t.Fatalf("offset/limit = %d/%d, want 0/100 defaults", got.Offset, got.Limit)
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
 		t.Errorf("Content-Type = %q, want application/json; charset=utf-8", ct)
@@ -73,8 +87,8 @@ func TestVideosEndpointEmptyStoreIsEmptyArray(t *testing.T) {
 }
 
 // TestVideosEndpointReturnsStoredRows pins the field names the embedded page
-// reads: /api/videos marshals store.Video directly, so the JSON keys are the Go
-// field names (Title, Author, Pubdate, State, Lang, IsCharging, ...).
+// reads: each page item marshals store.Video directly, so the JSON keys are the
+// Go field names (Title, Author, Pubdate, State, Lang, IsCharging, ...).
 func TestVideosEndpointReturnsStoredRows(t *testing.T) {
 	st := openStore(t)
 	if _, err := st.UpsertVideo(&store.Video{
@@ -90,15 +104,19 @@ func TestVideosEndpointReturnsStoredRows(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200", rec.Code)
 	}
-	var got []store.Video
+	var got VideoPage
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode %q: %v", rec.Body.String(), err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("videos = %v, want exactly one", got)
+	if len(got.Items) != 1 {
+		t.Fatalf("items = %v, want exactly one", got.Items)
 	}
-	if got[0].Title != "标题" || got[0].Author != "某UP" || got[0].State != store.StateDownloadable || got[0].Lang != "zh-Hans" {
-		t.Fatalf("video = %+v, want the seeded title/author/state/lang", got[0])
+	if got.Total != 1 {
+		t.Fatalf("total = %d, want 1", got.Total)
+	}
+	v := got.Items[0]
+	if v.Title != "标题" || v.Author != "某UP" || v.State != store.StateDownloadable || v.Lang != "zh-Hans" {
+		t.Fatalf("video = %+v, want the seeded title/author/state/lang", v)
 	}
 }
 
@@ -133,7 +151,7 @@ func TestProbeEndpointPassesURLAndKindToSeam(t *testing.T) {
 	const target = "https://www.bilibili.com/video/BV1uv411q7Mv"
 	var gotURL, gotKind string
 	s := newTestServer(t, Options{
-		Probe: func(_ context.Context, url, kind string, _ func(Progress)) (ProbeSummary, error) {
+		Probe: func(_ context.Context, url, kind string, _ bool, _ func(Progress)) (ProbeSummary, error) {
 			gotURL, gotKind = url, kind
 			return ProbeSummary{Probed: 1, Downloadable: 1}, nil
 		},
@@ -156,9 +174,35 @@ func TestProbeEndpointPassesURLAndKindToSeam(t *testing.T) {
 	}
 }
 
+func TestProbeEndpointPassesForceToSeam(t *testing.T) {
+	var gotForce bool
+	s := newTestServer(t, Options{
+		Probe: func(_ context.Context, _, _ string, force bool, _ func(Progress)) (ProbeSummary, error) {
+			gotForce = force
+			return ProbeSummary{Probed: 1, Skipped: 2}, nil
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/probe", `{"url":"BV1uv411q7Mv","force":true}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !gotForce {
+		t.Fatal("seam received force=false, want true")
+	}
+	var got ProbeSummary
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if got.Skipped != 2 {
+		t.Fatalf("skipped = %d, want 2 (the summary must carry the new field)", got.Skipped)
+	}
+}
+
 func TestProbeEndpointRejectsEmptyURL(t *testing.T) {
 	s := newTestServer(t, Options{
-		Probe: func(_ context.Context, _, _ string, _ func(Progress)) (ProbeSummary, error) {
+		Probe: func(_ context.Context, _, _ string, _ bool, _ func(Progress)) (ProbeSummary, error) {
 			t.Error("probe seam must not be called for an empty url")
 			return ProbeSummary{}, nil
 		},
@@ -186,7 +230,7 @@ func TestProbeEndpointWithoutSeamReturns501(t *testing.T) {
 // can scope its list to the source it just probed.
 func TestProbeEndpointResponseCarriesSourceAndKind(t *testing.T) {
 	s := newTestServer(t, Options{
-		Probe: func(context.Context, string, string, func(Progress)) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, bool, func(Progress)) (ProbeSummary, error) {
 			return ProbeSummary{Probed: 2}, nil
 		},
 	})
@@ -217,7 +261,7 @@ func TestProbeEndpointResponseCarriesSourceAndKind(t *testing.T) {
 // though ParseURL alone would reject it.
 func TestProbeEndpointExplicitKindOverridesAutoDetection(t *testing.T) {
 	s := newTestServer(t, Options{
-		Probe: func(context.Context, string, string, func(Progress)) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, bool, func(Progress)) (ProbeSummary, error) {
 			return ProbeSummary{Probed: 1}, nil
 		},
 	})
@@ -241,7 +285,7 @@ func TestProbeEndpointExplicitKindOverridesAutoDetection(t *testing.T) {
 
 func TestProbeEndpointRejectsUnparseableURL(t *testing.T) {
 	s := newTestServer(t, Options{
-		Probe: func(context.Context, string, string, func(Progress)) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, bool, func(Progress)) (ProbeSummary, error) {
 			t.Error("probe seam must not be called for an unparseable url")
 			return ProbeSummary{}, nil
 		},
@@ -263,7 +307,7 @@ func TestProbeEndpointBroadcastsProgress(t *testing.T) {
 	defer cancel()
 	s := newTestServer(t, Options{
 		Hub: hub,
-		Probe: func(_ context.Context, _, _ string, onProgress func(Progress)) (ProbeSummary, error) {
+		Probe: func(_ context.Context, _, _ string, _ bool, onProgress func(Progress)) (ProbeSummary, error) {
 			onProgress(Progress{Op: "probe", Done: 0, Total: 3})
 			onProgress(Progress{Op: "probe", Done: 3, Total: 3})
 			return ProbeSummary{Probed: 3}, nil
@@ -313,7 +357,7 @@ func TestDownloadEndpointBroadcastsProgress(t *testing.T) {
 	defer cancel()
 	s := newTestServer(t, Options{
 		Hub: hub,
-		Download: func(_ context.Context, _ string, _ bool, onProgress func(Progress)) (DownloadSummary, error) {
+		Download: func(_ context.Context, _ string, _ bool, _ string, onProgress func(Progress)) (DownloadSummary, error) {
 			onProgress(Progress{Op: "download", Done: 0, Total: 2})
 			onProgress(Progress{Op: "download", Done: 2, Total: 2})
 			return DownloadSummary{Fetched: 2}, nil
@@ -369,59 +413,64 @@ func TestVideosEndpointFiltersBySource(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200", rec.Code)
 	}
-	var filtered []store.Video
+	var filtered VideoPage
 	if err := json.Unmarshal(rec.Body.Bytes(), &filtered); err != nil {
 		t.Fatalf("decode %q: %v", rec.Body.String(), err)
 	}
-	if len(filtered) != 1 || filtered[0].Bvid != "BV1aaaa" {
-		t.Fatalf("filtered = %+v, want only BV1aaaa", filtered)
+	if len(filtered.Items) != 1 || filtered.Items[0].Bvid != "BV1aaaa" || filtered.Total != 1 {
+		t.Fatalf("filtered = %+v, want only BV1aaaa with total 1", filtered)
 	}
 
 	rec = serve(t, s, http.MethodGet, "/api/videos", "")
-	var all []store.Video
+	var all VideoPage
 	if err := json.Unmarshal(rec.Body.Bytes(), &all); err != nil {
 		t.Fatalf("decode %q: %v", rec.Body.String(), err)
 	}
-	if len(all) != 2 {
+	if len(all.Items) != 2 || all.Total != 2 {
 		t.Fatalf("all = %+v, want both rows without a source filter", all)
 	}
 }
 
-func TestDownloadEndpointPassesLangAndTranscribe(t *testing.T) {
-	var gotLang string
+func TestDownloadEndpointPassesLangTranscribeAndSource(t *testing.T) {
+	var gotLang, gotSource string
 	var gotTranscribe bool
 	s := newTestServer(t, Options{
-		Download: func(_ context.Context, lang string, transcribe bool, _ func(Progress)) (DownloadSummary, error) {
-			gotLang, gotTranscribe = lang, transcribe
+		Download: func(_ context.Context, lang string, transcribe bool, source string, _ func(Progress)) (DownloadSummary, error) {
+			gotLang, gotTranscribe, gotSource = lang, transcribe, source
 			return DownloadSummary{Fetched: 2, Failed: 1}, nil
 		},
 	})
 
-	rec := serve(t, s, http.MethodPost, "/api/download", `{"lang":"en","transcribe":true}`)
+	rec := serve(t, s, http.MethodPost, "/api/download", `{"lang":"en","transcribe":true,"source":"12345"}`)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
-	if gotLang != "en" || !gotTranscribe {
-		t.Fatalf("seam received lang=%q transcribe=%v, want en/true", gotLang, gotTranscribe)
+	if gotLang != "en" || !gotTranscribe || gotSource != "12345" {
+		t.Fatalf("seam received lang=%q transcribe=%v source=%q, want en/true/12345", gotLang, gotTranscribe, gotSource)
 	}
 }
 
-func TestExportEndpointReturnsZip(t *testing.T) {
+func TestExportEndpointReturnsZipAndPassesSource(t *testing.T) {
 	const zipPath = "data/exports/20261008-2.zip"
+	var gotSource string
 	s := newTestServer(t, Options{
-		Export: func(_ context.Context, formats []string, _ func(Progress)) (string, error) {
+		Export: func(_ context.Context, formats []string, source string, _ func(Progress)) (string, error) {
 			if len(formats) != 1 || formats[0] != "srt" {
 				t.Errorf("formats = %v, want [srt]", formats)
 			}
+			gotSource = source
 			return zipPath, nil
 		},
 	})
 
-	rec := serve(t, s, http.MethodPost, "/api/export", `{"formats":["srt"]}`)
+	rec := serve(t, s, http.MethodPost, "/api/export", `{"formats":["srt"],"source":"12345"}`)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if gotSource != "12345" {
+		t.Fatalf("seam received source=%q, want 12345", gotSource)
 	}
 	var got map[string]string
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -434,7 +483,7 @@ func TestExportEndpointReturnsZip(t *testing.T) {
 
 func TestExportEndpointRejectsEmptyFormats(t *testing.T) {
 	s := newTestServer(t, Options{
-		Export: func(_ context.Context, _ []string, _ func(Progress)) (string, error) {
+		Export: func(_ context.Context, _ []string, _ string, _ func(Progress)) (string, error) {
 			t.Error("export seam must not be called with no formats")
 			return "", nil
 		},
@@ -643,7 +692,7 @@ func TestZeroValueServerEventsDoesNotPanic(t *testing.T) {
 // not panic when a seam result is published.
 func TestServerWithNilHubBroadcastsSafely(t *testing.T) {
 	s := &Server{opts: Options{
-		Probe: func(context.Context, string, string, func(Progress)) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, bool, func(Progress)) (ProbeSummary, error) {
 			return ProbeSummary{Probed: 1}, nil
 		},
 	}}
@@ -720,7 +769,7 @@ func TestLoginStatusFailureReportsLoggedOutWithoutLeakingTheError(t *testing.T) 
 
 func TestCORSPreflightFromBilibiliIsAllowed(t *testing.T) {
 	s := newTestServer(t, Options{
-		Probe: func(context.Context, string, string, func(Progress)) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, bool, func(Progress)) (ProbeSummary, error) {
 			return ProbeSummary{}, nil
 		},
 	})
@@ -770,7 +819,7 @@ func TestHandoffEndpointSavesLoginAndReturnsURLWithoutProbing(t *testing.T) {
 		LoginStatus: func(context.Context) (LoginState, error) {
 			return LoginState{LoggedIn: true, Uname: "测试用户"}, nil
 		},
-		Probe: func(context.Context, string, string, func(Progress)) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, bool, func(Progress)) (ProbeSummary, error) {
 			probed = true
 			return ProbeSummary{}, nil
 		},
@@ -817,7 +866,7 @@ func TestHandoffEndpointReportsLoginErrorWithoutProbing(t *testing.T) {
 	probed := false
 	s := newTestServer(t, Options{
 		Login: func(string, string) error { return errors.New("sessdata 校验失败") },
-		Probe: func(context.Context, string, string, func(Progress)) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, bool, func(Progress)) (ProbeSummary, error) {
 			probed = true
 			return ProbeSummary{Probed: 2}, nil
 		},
@@ -887,7 +936,7 @@ func TestHandoffCORSRejectsForeignOrigin(t *testing.T) {
 	}
 }
 
-func TestVideosEndpointUnknownSourceIsEmptyArray(t *testing.T) {
+func TestVideosEndpointUnknownSourceHasEmptyItems(t *testing.T) {
 	st := openStore(t)
 	seedVideo(t, st, "BV1uv411q7Mv", store.StatePending)
 	s := newTestServer(t, Options{Store: st})
@@ -897,14 +946,170 @@ func TestVideosEndpointUnknownSourceIsEmptyArray(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200", rec.Code)
 	}
-	if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
-		t.Fatalf("body = %q, want []", got)
+	if !strings.Contains(rec.Body.String(), `"items":[]`) {
+		t.Fatalf("body = %q, want an empty items array", rec.Body.String())
+	}
+	var got VideoPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if len(got.Items) != 0 || got.Total != 0 {
+		t.Fatalf("page = %+v, want no rows for an unknown source", got)
+	}
+}
+
+// TestVideosEndpointPagination pins GET /api/videos' offset/limit contract: a
+// window of the id-ordered rows with the full total, a small limit, and a page
+// entirely past the end that still marshals an empty items array.
+func TestVideosEndpointPagination(t *testing.T) {
+	st := openStore(t)
+	for i := 0; i < 5; i++ {
+		seedVideo(t, st, fmt.Sprintf("BV%d", i), store.StatePending)
+	}
+	s := New(Options{Store: st})
+
+	t.Run("window", func(t *testing.T) {
+		rec := serve(t, s, http.MethodGet, "/api/videos?offset=1&limit=2", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("code = %d, want 200", rec.Code)
+		}
+		var got VideoPage
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode %q: %v", rec.Body.String(), err)
+		}
+		if got.Total != 5 || got.Offset != 1 || got.Limit != 2 {
+			t.Fatalf("page meta = %+v, want total=5 offset=1 limit=2", got)
+		}
+		if len(got.Items) != 2 || got.Items[0].Bvid != "BV1" || got.Items[1].Bvid != "BV2" {
+			t.Fatalf("items = %+v, want BV1,BV2", got.Items)
+		}
+	})
+
+	t.Run("past the end is an empty array", func(t *testing.T) {
+		rec := serve(t, s, http.MethodGet, "/api/videos?offset=99", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("code = %d, want 200", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), `"items":[]`) {
+			t.Fatalf("body = %q, want an empty items array", rec.Body.String())
+		}
+		var got VideoPage
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode %q: %v", rec.Body.String(), err)
+		}
+		if got.Total != 5 || len(got.Items) != 0 {
+			t.Fatalf("page = %+v, want total=5 and no items", got)
+		}
+	})
+}
+
+// TestVideosEndpointLimitClamped pins the limit bounds: an oversized limit is
+// capped at 500, a zero/negative limit floors at 1, and a non-numeric limit
+// falls back to the default 100. A negative offset is treated as 0.
+func TestVideosEndpointLimitClamped(t *testing.T) {
+	s := newTestServer(t, Options{})
+	tests := []struct {
+		query     string
+		wantLimit int
+		wantOff   int
+	}{
+		{query: "?limit=1000", wantLimit: 500},
+		{query: "?limit=0", wantLimit: 1},
+		{query: "?limit=-5", wantLimit: 1},
+		{query: "?limit=abc", wantLimit: 100},
+		{query: "?offset=-3", wantLimit: 100, wantOff: 0},
+		{query: "?offset=abc", wantLimit: 100, wantOff: 0},
+	}
+	for _, tc := range tests {
+		rec := serve(t, s, http.MethodGet, "/api/videos"+tc.query, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: code = %d, want 200", tc.query, rec.Code)
+		}
+		var got VideoPage
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("%s: decode %q: %v", tc.query, rec.Body.String(), err)
+		}
+		if got.Limit != tc.wantLimit || got.Offset != tc.wantOff {
+			t.Errorf("%s: limit/offset = %d/%d, want %d/%d", tc.query, got.Limit, got.Offset, tc.wantLimit, tc.wantOff)
+		}
+	}
+}
+
+// TestResetEndpointRequiresConfirm pins POST /api/reset's guard: a missing or
+// false confirm is a 400 and touches no data.
+func TestResetEndpointRequiresConfirm(t *testing.T) {
+	st := openStore(t)
+	seedVideo(t, st, "BV1aaaa", store.StateFetched)
+	s := New(Options{Store: st})
+
+	for _, body := range []string{`{}`, `{"confirm":false}`, `{"confirm":"yes"}`} {
+		rec := serve(t, s, http.MethodPost, "/api/reset", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %s: code = %d, want 400", body, rec.Code)
+		}
+	}
+	if n, err := st.CountVideos("", ""); err != nil || n != 1 {
+		t.Fatalf("confirm guard deleted rows: count=%d err=%v", n, err)
+	}
+}
+
+// TestResetEndpointDeletesVideosAndBroadcasts pins the confirmed path: it deletes
+// every video and transcript, reports the count, and announces a `reset` event
+// so other open pages reload their now-empty list.
+func TestResetEndpointDeletesVideosAndBroadcasts(t *testing.T) {
+	st := openStore(t)
+	id, err := st.UpsertVideo(&store.Video{Bvid: "BV1aaaa", Cid: 1, State: store.StateFetched})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := st.SaveTranscript(id, "bilibili", "zh-Hans", `{"segments":[]}`); err != nil {
+		t.Fatalf("save transcript: %v", err)
+	}
+	seedVideo(t, st, "BV1bbbb", store.StatePending)
+	hub := NewHub()
+	events, cancel := hub.Subscribe()
+	defer cancel()
+	s := New(Options{Store: st, Hub: hub})
+
+	rec := serve(t, s, http.MethodPost, "/api/reset", `{"confirm":true}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		OK      bool  `json:"ok"`
+		Deleted int64 `json:"deleted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if !got.OK || got.Deleted != 2 {
+		t.Fatalf("body = %+v, want ok/deleted=2", got)
+	}
+	if n, err := st.CountVideos("", ""); err != nil || n != 0 {
+		t.Fatalf("videos left after reset: count=%d err=%v", n, err)
+	}
+	if _, _, _, err := st.GetTranscript(id); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("transcript left after reset: err = %v, want sql.ErrNoRows", err)
+	}
+
+	select {
+	case ev := <-events:
+		if ev.Type != "reset" {
+			t.Fatalf("event = %+v, want a reset event", ev)
+		}
+		data, ok := ev.Data.(map[string]int64)
+		if !ok || data["deleted"] != 2 {
+			t.Fatalf("event data = %#v, want deleted=2", ev.Data)
+		}
+	default:
+		t.Fatal("no reset event was broadcast")
 	}
 }
 
 func TestProbeEndpointRejectsUnknownKind(t *testing.T) {
 	s := newTestServer(t, Options{
-		Probe: func(context.Context, string, string, func(Progress)) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, bool, func(Progress)) (ProbeSummary, error) {
 			t.Fatal("the probe seam must not be called for an unknown kind")
 			return ProbeSummary{}, nil
 		},
