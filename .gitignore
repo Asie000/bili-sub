@@ -1,0 +1,6 @@
+.superpowers/
+data/
+.env
+*.db
+exports/
+dist/
