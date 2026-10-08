@@ -14,13 +14,13 @@ type nopLimiter struct{}
 
 func (nopLimiter) Wait(context.Context) error { return nil }
 
-// shrinkRetryBackoff makes the 412 retry wait a millisecond so tests do not
-// sleep for the production one-second window.
+// shrinkRetryBackoff makes the 412 retries wait a millisecond so tests do not
+// sleep for the production backoff windows.
 func shrinkRetryBackoff(t *testing.T) {
 	t.Helper()
-	previous := retryBackoff
-	retryBackoff = time.Millisecond
-	t.Cleanup(func() { retryBackoff = previous })
+	previous := retryBackoffs
+	retryBackoffs = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { retryBackoffs = previous })
 }
 
 func TestGetSuccess(t *testing.T) {
@@ -205,7 +205,7 @@ func TestGetReturnsClearErrorAfterRepeated412(t *testing.T) {
 	if !strings.Contains(err.Error(), "412") || !strings.Contains(err.Error(), "完整 Cookie") {
 		t.Fatalf("error = %v, want the 412 risk-control hint", err)
 	}
-	if apiCalls != 2 {
-		t.Fatalf("api calls = %d, want 2 (initial + one retry)", apiCalls)
+	if apiCalls != 4 {
+		t.Fatalf("api calls = %d, want 4 (initial + three retries)", apiCalls)
 	}
 }

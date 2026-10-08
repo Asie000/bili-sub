@@ -65,9 +65,10 @@ type Client struct {
 	buvid4     string
 }
 
-// retryBackoff is how long the 412 retry waits before its single re-attempt. It
-// is a variable so tests can shorten it.
-var retryBackoff = time.Second
+// retryBackoffs are the waits before each 412 retry. B站's 412 is usually a
+// short-lived rate limit, so we wait it out a few times before giving up. The
+// slice is a variable so tests can shrink it.
+var retryBackoffs = []time.Duration{2 * time.Second, 5 * time.Second, 12 * time.Second}
 
 func NewClient(sessdata string, limiter Limiter) *Client {
 	return &Client{
@@ -98,22 +99,28 @@ func (c *Client) Get(ctx context.Context, rawURL string, params map[string]strin
 		return err
 	}
 	if resp.StatusCode == http.StatusPreconditionFailed {
-		// B站 answers 412 when its risk control rejects the request. Wait out
-		// the short window and retry once with the exact same cookies; a full
-		// browser Cookie usually clears it, while a bare SESSDATA does not.
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-		if err := sleepCtx(ctx, retryBackoff); err != nil {
-			return err
-		}
-		resp, err = c.do(ctx, u.String())
-		if err != nil {
-			return err
+		// B站 answers 412 when its risk control rejects the request. It is
+		// usually a short-lived rate limit, so wait it out and retry a few
+		// times with the exact same cookies; a full browser Cookie clears it
+		// more reliably than a bare SESSDATA.
+		for _, wait := range retryBackoffs {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if err := sleepCtx(ctx, wait); err != nil {
+				return err
+			}
+			resp, err = c.do(ctx, u.String())
+			if err != nil {
+				return err
+			}
+			if resp.StatusCode != http.StatusPreconditionFailed {
+				break
+			}
 		}
 		if resp.StatusCode == http.StatusPreconditionFailed {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
-			return fmt.Errorf("HTTP 412（B站风控限流）：请稍后再试，或在页面粘贴浏览器完整 Cookie")
+			return fmt.Errorf("HTTP 412（B站风控限流）：请求过于频繁被临时拦截，请等几分钟再试；若持续出现，可在页面登录框粘贴浏览器完整 Cookie")
 		}
 	}
 	defer resp.Body.Close()
