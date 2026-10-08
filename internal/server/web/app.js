@@ -1,0 +1,250 @@
+"use strict";
+
+// The page talks to the JSON API in internal/server/http.go. /api/videos
+// marshals store.Video directly, so the JSON keys are the Go field names
+// (Title, Author, Pubdate, State, Lang, IsCharging, ...).
+
+const $ = (id) => document.getElementById(id);
+
+const STATE_LABELS = {
+  pending: "待处理",
+  probed: "已探测",
+  downloadable: "可下载",
+  no_subtitle: "无字幕",
+  charging_locked: "充电专属",
+  fetched: "已抓取",
+  transcribed: "已转写",
+  exported: "已导出",
+  failed: "失败",
+};
+
+// api performs a fetch and returns the parsed JSON body (or null for an empty
+// body). A non-2xx response is turned into an Error carrying the server's
+// {"error": "..."} message.
+async function api(path, options) {
+  const res = await fetch(path, options);
+  const text = await res.text();
+  let data = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch (err) {
+      data = null;
+    }
+  }
+  if (!res.ok) {
+    throw new Error(data && data.error ? data.error : `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+function post(path, body) {
+  return api(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+function log(message) {
+  const line = `[${new Date().toLocaleTimeString()}] ${message}`;
+  const box = $("log");
+  box.textContent += line + "\n";
+  box.scrollTop = box.scrollHeight;
+}
+
+function formatPubdate(seconds) {
+  if (!seconds || seconds <= 0) {
+    return "-";
+  }
+  const d = new Date(seconds * 1000);
+  if (Number.isNaN(d.getTime())) {
+    return "-";
+  }
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function formatTitle(v) {
+  if (v.PageIndex > 1) {
+    const part = v.Part ? ` ${v.Part}` : "";
+    return `${v.Title || v.Bvid}_P${v.PageIndex}${part}`;
+  }
+  return v.Title || v.Bvid || "(无标题)";
+}
+
+function renderTable(videos) {
+  const tbody = $("videos-body");
+  tbody.textContent = "";
+  if (!Array.isArray(videos) || videos.length === 0) {
+    const row = tbody.insertRow();
+    const cell = row.insertCell();
+    cell.colSpan = 7;
+    cell.className = "empty";
+    cell.textContent = "暂无视频，请添加视频";
+    return;
+  }
+  videos.forEach((v, i) => {
+    const row = tbody.insertRow();
+    row.insertCell().textContent = i + 1;
+    row.insertCell().textContent = formatTitle(v);
+    row.insertCell().textContent = v.Author || "-";
+    row.insertCell().textContent = formatPubdate(v.Pubdate);
+    const state = row.insertCell();
+    state.textContent = STATE_LABELS[v.State] || v.State || "-";
+    state.className = `state state-${v.State || "unknown"}`;
+    row.insertCell().textContent = v.Lang || "-";
+    row.insertCell().textContent = v.IsCharging ? "是" : "否";
+  });
+}
+
+async function loadVideos() {
+  try {
+    const videos = await api("/api/videos");
+    renderTable(videos);
+    await loadStats();
+  } catch (err) {
+    log(`读取视频列表失败：${err.message}`);
+    renderTable([]);
+  }
+}
+
+async function loadStats() {
+  try {
+    const stats = await api("/api/stats");
+    const parts = Object.keys(stats || {}).map((k) => `${STATE_LABELS[k] || k} ${stats[k]}`);
+    $("stats").textContent = parts.length ? `（${parts.join("，")}）` : "";
+  } catch (err) {
+    log(`读取统计失败：${err.message}`);
+  }
+}
+
+async function probe() {
+  const url = $("url").value.trim();
+  if (!url) {
+    log("请输入链接再探测。");
+    return;
+  }
+  log(`开始探测：${url}`);
+  try {
+    const summary = await post("/api/probe", { url });
+    log(`探测完成：共 ${summary.probed}，可下载 ${summary.downloadable}，无字幕 ${summary.no_subtitle}，充电锁定 ${summary.charging_locked}，失败 ${summary.failed}`);
+    await loadVideos();
+  } catch (err) {
+    log(`探测失败：${err.message}`);
+  }
+}
+
+async function download() {
+  log("开始获取字幕…");
+  try {
+    const summary = await post("/api/download", {
+      lang: $("lang").value,
+      transcribe: $("transcribe").checked,
+    });
+    log(`获取字幕完成：成功 ${summary.fetched}，失败 ${summary.failed}`);
+    await loadVideos();
+  } catch (err) {
+    log(`获取字幕失败：${err.message}`);
+  }
+}
+
+async function exportZip() {
+  const formats = ["srt"];
+  log(`开始导出（${formats.join(",")}）…`);
+  try {
+    const result = await post("/api/export", { formats });
+    log(`导出完成：${result.zip}`);
+  } catch (err) {
+    log(`导出失败：${err.message}`);
+  }
+}
+
+async function saveSessdata() {
+  const sessdata = $("sessdata").value;
+  if (!sessdata) {
+    log("请先粘贴 SESSDATA。");
+    return;
+  }
+  try {
+    await post("/api/login/sessdata", { sessdata });
+    $("sessdata").value = "";
+    $("login-status").textContent = "登录状态：已保存 SESSDATA";
+    log("SESSDATA 已保存。");
+  } catch (err) {
+    log(`保存 SESSDATA 失败：${err.message}`);
+  }
+}
+
+async function qrLogin() {
+  try {
+    const result = await api("/api/login/qrcode");
+    const area = $("qr-area");
+    area.hidden = false;
+    area.textContent = `请用哔哩哔哩 App 扫描：${result.url}`;
+    log(`二维码已生成：${result.url}`);
+  } catch (err) {
+    log(`获取二维码失败：${err.message}`);
+  }
+}
+
+function clearTable() {
+  $("videos-body").textContent = "";
+  $("stats").textContent = "";
+  $("log").textContent = "";
+  log("已清空列表与进度。");
+}
+
+function formatEvent(ev) {
+  const data = ev.data || {};
+  switch (ev.type) {
+    case "probe":
+      return `探测事件：共 ${data.probed}，可下载 ${data.downloadable}，无字幕 ${data.no_subtitle}，充电锁定 ${data.charging_locked}，失败 ${data.failed}`;
+    case "download":
+      return `下载事件：成功 ${data.fetched}，失败 ${data.failed}`;
+    case "export":
+      return `导出事件：${data.zip}`;
+    case "login":
+      return data.error ? `扫码登录失败：${data.error}` : "扫码登录成功，已保存 SESSDATA。";
+    default:
+      return `事件 ${ev.type}：${JSON.stringify(data)}`;
+  }
+}
+
+// connectEvents subscribes to the server's SSE stream. EventSource reconnects
+// on its own if the connection drops.
+function connectEvents() {
+  const source = new EventSource("/api/events");
+  source.onmessage = (e) => {
+    try {
+      const ev = JSON.parse(e.data);
+      log(formatEvent(ev));
+      if (ev.type === "login" && ev.data && ev.data.ok) {
+        $("login-status").textContent = "登录状态：已保存 SESSDATA";
+      }
+      if (ev.type === "probe" || ev.type === "download") {
+        loadVideos();
+      }
+    } catch (err) {
+      log(`事件解析失败：${e.data}`);
+    }
+  };
+  source.onerror = () => {
+    // The browser retries automatically; surface it once without spamming.
+    if (!connectEvents.warned) {
+      connectEvents.warned = true;
+      log("SSE 连接中断，浏览器会自动重连。");
+    }
+  };
+}
+
+$("probe").addEventListener("click", probe);
+$("download").addEventListener("click", download);
+$("export").addEventListener("click", exportZip);
+$("refresh").addEventListener("click", loadVideos);
+$("clear").addEventListener("click", clearTable);
+$("save-sessdata").addEventListener("click", saveSessdata);
+$("qr-login").addEventListener("click", qrLogin);
+
+loadVideos();
+connectEvents();

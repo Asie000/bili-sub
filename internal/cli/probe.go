@@ -24,9 +24,20 @@ func newProbeCmd() *cobra.Command {
 				return err
 			}
 			defer rt.close()
-			return rt.probe(cmd.Context(), cmd.OutOrStdout(), args[0])
+			_, err = rt.probe(cmd.Context(), cmd.OutOrStdout(), args[0])
+			return err
 		},
 	}
+}
+
+// probeStats is what one probe run learned about its source. Both the CLI
+// summary line and the HTTP /api/probe ProbeSummary are built from it.
+type probeStats struct {
+	Total          int
+	Downloadable   int
+	NoSubtitle     int
+	ChargingLocked int
+	Failed         int
 }
 
 // probeOutcome is what one worker learned about one video. err is carried in
@@ -37,24 +48,25 @@ type probeOutcome struct {
 	err    error
 }
 
-func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL string) error {
+func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL string) (probeStats, error) {
+	var stats probeStats
 	kind, key, err := pipeline.ParseURL(rawURL)
 	if err != nil {
-		return err
+		return stats, err
 	}
 	client, err := r.client()
 	if err != nil {
-		return err
+		return stats, err
 	}
 	en := pipeline.NewEnumerator(client)
 
 	infos, err := collectVideos(ctx, en, kind, key)
 	if err != nil {
-		return err
+		return stats, err
 	}
 	st, err := r.store()
 	if err != nil {
-		return err
+		return stats, err
 	}
 
 	var videos []store.Video
@@ -64,14 +76,15 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL string) error
 	for i := range videos {
 		id, err := st.UpsertVideo(&videos[i])
 		if err != nil {
-			return fmt.Errorf("probe %s: 写入 videos: %w", videos[i].Bvid, err)
+			return stats, fmt.Errorf("probe %s: 写入 videos: %w", videos[i].Bvid, err)
 		}
 		videos[i].ID = id
 	}
 	if len(videos) == 0 {
 		fmt.Fprintln(out, "该来源没有视频。")
-		return nil
+		return stats, nil
 	}
+	stats.Total = len(videos)
 
 	prober := pipeline.NewProber(client, st, en)
 	outcomes := pipeline.Run(ctx, videos, r.cfg.Concurrency, func(ctx context.Context, v store.Video) (probeOutcome, error) {
@@ -89,23 +102,22 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL string) error
 		return probeOutcome{err: err}, nil
 	})
 
-	var okCount, noSubCount, chargingCount, failCount int
 	stateFor := func(i int, v store.Video) string {
 		o := outcomes[i]
 		switch {
 		case o.Value.result != nil && o.Value.result.ChargingLocked:
-			chargingCount++
+			stats.ChargingLocked++
 			return "充电专属"
 		case o.Value.result != nil && o.Value.result.HasSubtitle:
-			okCount++
+			stats.Downloadable++
 			return "可下载"
 		case o.Value.result != nil:
-			noSubCount++
+			stats.NoSubtitle++
 			return "无字幕"
 		default:
 			// Either ProbeVideo failed or the run was cancelled before this
 			// video was picked up.
-			failCount++
+			stats.Failed++
 			return "失败"
 		}
 	}
@@ -120,10 +132,10 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL string) error
 		return ""
 	}
 	if err := writeVideosTable(out, videos, stateFor, langFor); err != nil {
-		return err
+		return stats, err
 	}
 	fmt.Fprintf(out, "探测完成：共 %d，可下载 %d，无字幕 %d，充电锁定 %d，失败 %d\n",
-		len(videos), okCount, noSubCount, chargingCount, failCount)
+		stats.Total, stats.Downloadable, stats.NoSubtitle, stats.ChargingLocked, stats.Failed)
 	// The table shows only a 失败 marker, so print why each probe failed.
 	for i, o := range outcomes {
 		if o.Value.err != nil {
@@ -131,9 +143,9 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL string) error
 		}
 	}
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return stats, ctx.Err()
 	}
-	return nil
+	return stats, nil
 }
 
 // collectVideos turns a parsed source into full VideoInfo records.

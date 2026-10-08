@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bili-sub 字幕采集</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>bili-sub 字幕采集</h1>
+  <div id="login-status" class="status">登录状态：未设置 SESSDATA</div>
+</header>
+
+<main>
+  <section class="panel login-panel">
+    <h2>登录 / Cookie</h2>
+    <input id="sessdata" type="password" autocomplete="off" placeholder="粘贴 SESSDATA">
+    <button id="save-sessdata">保存 SESSDATA</button>
+    <button id="qr-login">扫码登录</button>
+    <div id="qr-area" class="hint" hidden></div>
+  </section>
+
+  <section class="panel">
+    <h2>来源</h2>
+    <div class="row">
+      <input id="url" type="text" placeholder="视频 / UP主空间 / 收藏夹 链接">
+      <button id="probe">探测</button>
+    </div>
+    <div class="row">
+      <label for="lang">字幕语言</label>
+      <select id="lang">
+        <option value="">默认</option>
+        <option value="zh">中文</option>
+        <option value="en">英文</option>
+      </select>
+      <label class="checkbox"><input id="transcribe" type="checkbox"> 无字幕时转写</label>
+      <button id="download">获取字幕</button>
+      <button id="export">导出</button>
+      <button id="refresh">刷新</button>
+      <button id="clear">清空</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>视频列表 <span id="stats" class="hint"></span></h2>
+    <table>
+      <thead>
+        <tr>
+          <th>序号</th><th>标题</th><th>作者</th><th>发布日期</th>
+          <th>字幕状态</th><th>字幕语言</th><th>是否充电</th>
+        </tr>
+      </thead>
+      <tbody id="videos-body"></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <h2>进度</h2>
+    <pre id="log" class="log"></pre>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

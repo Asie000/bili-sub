@@ -38,17 +38,21 @@ func newExportCmd() *cobra.Command {
 				return err
 			}
 			defer rt.close()
-			return rt.export(cmd.OutOrStdout(), cmd.ErrOrStderr(), formats)
+			_, err = rt.export(cmd.OutOrStdout(), cmd.ErrOrStderr(), formats)
+			return err
 		},
 	}
 	cmd.Flags().String("format", "srt,txt,json,md", "导出格式，逗号分隔：srt,txt,md,json")
 	return cmd
 }
 
-func (r *runtime) export(out, warn io.Writer, formats []string) error {
+// export packs the fetched/transcribed subtitles and returns the zip path (for
+// the HTTP /api/export response). out receives the summary line, warn the
+// per-video skip notices.
+func (r *runtime) export(out, warn io.Writer, formats []string) (string, error) {
 	st, err := r.store()
 	if err != nil {
-		return err
+		return "", err
 	}
 	// transcribed is included so ASR output (Task 15) is exported too, even
 	// though nothing writes that state yet.
@@ -56,12 +60,12 @@ func (r *runtime) export(out, warn io.Writer, formats []string) error {
 	for _, state := range []string{store.StateFetched, store.StateTranscribed} {
 		list, err := st.ListVideos(state)
 		if err != nil {
-			return err
+			return "", err
 		}
 		videos = append(videos, list...)
 	}
 	if len(videos) == 0 {
-		return errors.New("export: 没有已抓取的字幕，先运行 download")
+		return "", errors.New("export: 没有已抓取的字幕，先运行 download")
 	}
 
 	docs := make(map[string]*ir.Document, len(videos))
@@ -74,7 +78,7 @@ func (r *runtime) export(out, warn io.Writer, formats []string) error {
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("export %s: 读取 IR: %w", v.Bvid, err)
+			return "", fmt.Errorf("export %s: 读取 IR: %w", v.Bvid, err)
 		}
 		var doc ir.Document
 		if err := json.Unmarshal([]byte(irJSON), &doc); err != nil {
@@ -93,14 +97,14 @@ func (r *runtime) export(out, warn io.Writer, formats []string) error {
 		docs[key] = &doc
 	}
 	if len(docs) == 0 {
-		return errors.New("export: 没有可导出的字幕，所有视频都缺少有效 IR")
+		return "", errors.New("export: 没有可导出的字幕，所有视频都缺少有效 IR")
 	}
 
 	outDir := filepath.Join(r.cfg.DataDir, "exports")
 	zipPath, err := export.Pack(outDir, time.Now(), docs, formats)
 	if err != nil {
-		return err
+		return "", err
 	}
 	fmt.Fprintf(out, "导出完成：%s（%d 个视频 × %d 种格式）\n", zipPath, len(docs), len(formats))
-	return nil
+	return zipPath, nil
 }

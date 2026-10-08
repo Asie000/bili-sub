@@ -49,7 +49,8 @@ func newDownloadCmd() *cobra.Command {
 				return err
 			}
 			defer rt.close()
-			return rt.download(cmd.Context(), cmd.OutOrStdout(), lang, formats, transcribe)
+			_, err = rt.download(cmd.Context(), cmd.OutOrStdout(), lang, formats, transcribe)
+			return err
 		},
 	}
 	cmd.Flags().String("lang", "", "字幕语言（如 zh、en），空则自动选择")
@@ -58,10 +59,19 @@ func newDownloadCmd() *cobra.Command {
 	return cmd
 }
 
-func (r *runtime) download(ctx context.Context, out io.Writer, lang string, formats []string, transcribe bool) error {
+// downloadStats is what one download run produced, for the CLI summary line and
+// the HTTP /api/download DownloadSummary.
+type downloadStats struct {
+	Total   int
+	Fetched int
+	Failed  int
+}
+
+func (r *runtime) download(ctx context.Context, out io.Writer, lang string, formats []string, transcribe bool) (downloadStats, error) {
+	var stats downloadStats
 	st, err := r.store()
 	if err != nil {
-		return err
+		return stats, err
 	}
 
 	if transcribe {
@@ -74,7 +84,7 @@ func (r *runtime) download(ctx context.Context, out io.Writer, lang string, form
 			backend.Name(), r.cfg.PythonPath, transcribeWorkerScript)
 		noSubtitle, err := st.ListVideos(store.StateNoSubtitle)
 		if err != nil {
-			return err
+			return stats, err
 		}
 		if len(noSubtitle) > 0 {
 			fmt.Fprintf(out, "注意：%d 个无字幕视频需要本地转写，但 v1 尚未下载播放音频（缺少音频源），本次跳过、不转写。\n",
@@ -84,16 +94,17 @@ func (r *runtime) download(ctx context.Context, out io.Writer, lang string, form
 
 	videos, err := st.ListVideos(store.StateDownloadable)
 	if err != nil {
-		return err
+		return stats, err
 	}
 	if len(videos) == 0 {
 		fmt.Fprintln(out, "没有可下载的字幕；先运行 probe。")
-		return nil
+		return stats, nil
 	}
 	client, err := r.client()
 	if err != nil {
-		return err
+		return stats, err
 	}
+	stats.Total = len(videos)
 	en := pipeline.NewEnumerator(client)
 	dir := r.subtitleDir()
 	dl := pipeline.NewDownloader(client, st, en, dir)
@@ -123,16 +134,18 @@ func (r *runtime) download(ctx context.Context, out io.Writer, lang string, form
 			continue
 		}
 		if err := writeSubtitleFormats(dir, v, res.Value, formats); err != nil {
-			return fmt.Errorf("download %s: %w", v.Bvid, err)
+			return stats, fmt.Errorf("download %s: %w", v.Bvid, err)
 		}
 		okCount++
 		fmt.Fprintf(out, "第 %d 项 %s 已下载（%s）\n", i+1, v.Bvid, res.Value.Lang)
 	}
-	fmt.Fprintf(out, "下载完成：共 %d，成功 %d，失败 %d，输出目录 %s\n", len(videos), okCount, failCount, dir)
+	stats.Fetched = okCount
+	stats.Failed = failCount
+	fmt.Fprintf(out, "下载完成：共 %d，成功 %d，失败 %d，输出目录 %s\n", stats.Total, okCount, failCount, dir)
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return stats, ctx.Err()
 	}
-	return nil
+	return stats, nil
 }
 
 // writeSubtitleFormats renders the requested formats next to the .srt that
