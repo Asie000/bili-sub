@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,11 +14,22 @@ import (
 	"bilibili-sub/internal/bili"
 	"bilibili-sub/internal/export"
 	"bilibili-sub/internal/server"
+	"bilibili-sub/internal/store"
 )
 
 // loginCheckTimeout bounds the SESSDATA validity check POST /api/login/sessdata
 // performs after saving the value.
 const loginCheckTimeout = 30 * time.Second
+
+// qrLoginTimeout bounds the background QR poll: a code that is scanned starts
+// the login within seconds and one that is not expires on its own, so this is
+// only a backstop that keeps a wedged poll from leaking its goroutine.
+const qrLoginTimeout = 5 * time.Minute
+
+// errOperationBusy is returned by a seam when another pipeline operation is
+// still running. Probe, download and export all fetch through the same client,
+// so overlap would multiply the request rate BILI_QPS is there to cap.
+var errOperationBusy = errors.New("已有任务在执行，请等它完成后再试")
 
 func newServeCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -41,20 +53,35 @@ func newServeCmd() *cobra.Command {
 	return cmd
 }
 
-// serve wires the store and the pipeline seams into the HTTP server. The seams
-// reuse the CLI helpers, so the browser runs exactly the same pipeline as
-// `bilibili-sub probe|download|export`.
+// serve wires the store and the pipeline seams into the HTTP server.
 func (r *runtime) serve(out io.Writer, addr string) error {
 	st, err := r.store()
 	if err != nil {
 		return err
 	}
-	hub := server.NewHub()
+	srv := server.New(r.serveOptions(st, server.NewHub()))
 
-	srv := server.New(server.Options{
+	display := addr
+	if strings.HasPrefix(display, ":") {
+		display = "localhost" + display
+	}
+	fmt.Fprintf(out, "Web 界面已启动：http://%s（Ctrl+C 退出）\n", display)
+	return http.ListenAndServe(addr, srv.Handler())
+}
+
+// serveOptions builds the server's seams. They reuse the CLI helpers, so the
+// browser runs exactly the same pipeline as `bilibili-sub probe|download|export`.
+// The three long-running seams share r.opMu and report errOperationBusy instead
+// of running alongside each other.
+func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options {
+	return server.Options{
 		Store: st,
 		Hub:   hub,
 		Probe: func(ctx context.Context, rawURL string) (server.ProbeSummary, error) {
+			if !r.opMu.TryLock() {
+				return server.ProbeSummary{}, errOperationBusy
+			}
+			defer r.opMu.Unlock()
 			stats, err := r.probe(ctx, io.Discard, rawURL)
 			if err != nil {
 				return server.ProbeSummary{}, err
@@ -68,6 +95,10 @@ func (r *runtime) serve(out io.Writer, addr string) error {
 			}, nil
 		},
 		Download: func(ctx context.Context, lang string, transcribe bool) (server.DownloadSummary, error) {
+			if !r.opMu.TryLock() {
+				return server.DownloadSummary{}, errOperationBusy
+			}
+			defer r.opMu.Unlock()
 			// The downloader owns the .srt; export renders the other formats
 			// from the stored IR, so only srt is written here.
 			stats, err := r.download(ctx, io.Discard, lang, []string{export.FormatSRT}, transcribe)
@@ -77,18 +108,15 @@ func (r *runtime) serve(out io.Writer, addr string) error {
 			return server.DownloadSummary{Fetched: stats.Fetched, Failed: stats.Failed}, nil
 		},
 		Export: func(_ context.Context, formats []string) (string, error) {
+			if !r.opMu.TryLock() {
+				return "", errOperationBusy
+			}
+			defer r.opMu.Unlock()
 			return r.export(io.Discard, io.Discard, formats)
 		},
 		Login:   r.saveSessdata,
 		QRLogin: r.qrLogin(hub),
-	})
-
-	display := addr
-	if strings.HasPrefix(display, ":") {
-		display = "localhost" + display
 	}
-	fmt.Fprintf(out, "Web 界面已启动：http://%s（Ctrl+C 退出）\n", display)
-	return http.ListenAndServe(addr, srv.Handler())
 }
 
 // saveSessdata persists a SESSDATA and verifies it before reporting success, so
@@ -113,33 +141,64 @@ func (r *runtime) saveSessdata(sessdata string) error {
 	return nil
 }
 
-// qrLogin builds the QRLogin seam. GET /api/login/qrcode only returns the code's
-// URL, so the poll that completes the scan runs in the background and reports
-// the result over SSE.
+// qrResult is the single outcome the QR goroutine reports back to its request:
+// the code's url once it exists, or the error that stopped the flow before that.
+type qrResult struct {
+	url string
+	err error
+}
+
+// newQRLoginClient builds the QR login client. It is a variable so tests can
+// point the flow at a local server.
+var newQRLoginClient = bili.NewQRLoginClient
+
+// qrLogin builds the QRLogin seam. GET /api/login/qrcode returns only the
+// code's url, so the scan-completing poll runs in a background goroutine and
+// reports its result over SSE. The goroutine always sends exactly one result (a
+// url or an error) before returning, so the request can never wait forever for
+// a url that will not arrive.
 func (r *runtime) qrLogin(hub *server.Hub) func(context.Context) (string, error) {
 	return func(ctx context.Context) (string, error) {
-		client := bili.NewQRLoginClient()
-		qrURL := make(chan string, 1)
+		client := newQRLoginClient()
+		// The poll outlives this request: the browser displays the url and the
+		// scan is confirmed later. It therefore runs on its own context rather
+		// than the request's (net/http cancels the request context as soon as
+		// ServeHTTP returns), bounded by qrLoginTimeout.
+		pollCtx, cancelPoll := context.WithTimeout(context.Background(), qrLoginTimeout)
+		done := make(chan qrResult, 1)
 		go func() {
-			sessdata, err := client.Login(context.Background(), func(url string) {
-				select {
-				case qrURL <- url:
-				default:
-				}
+			defer cancelPoll()
+			var urlSent bool
+			sessdata, err := client.Login(pollCtx, func(url string) {
+				urlSent = true
+				// Buffered, so the send never blocks even if the request is gone.
+				done <- qrResult{url: url}
 			})
 			if err == nil {
 				err = bili.SaveSESSDATA(r.sessionPath(), sessdata)
 			}
-			if err != nil {
+			switch {
+			case err == nil:
+				hub.Broadcast(server.Event{Type: "login", Data: map[string]bool{"ok": true}})
+			case errors.Is(err, context.Canceled):
+				// The request gave up and cancelled the poll; it already answered
+				// with that error, so there is nothing to report.
+			case urlSent:
 				hub.Broadcast(server.Event{Type: "login", Data: map[string]string{"error": err.Error()}})
-				return
+			default:
+				done <- qrResult{err: err}
 			}
-			hub.Broadcast(server.Event{Type: "login", Data: map[string]bool{"ok": true}})
 		}()
 		select {
-		case url := <-qrURL:
-			return url, nil
+		case res := <-done:
+			if res.err != nil {
+				cancelPoll()
+				return "", res.err
+			}
+			return res.url, nil
 		case <-ctx.Done():
+			// A client that disconnected before the url arrived stops the poll.
+			cancelPoll()
 			return "", ctx.Err()
 		}
 	}

@@ -17,7 +17,8 @@ type Event struct {
 const subscriberBuffer = 16
 
 // Hub fans an Event out to every current subscriber. It is safe for concurrent
-// use by HTTP handlers and pipeline callbacks.
+// use by HTTP handlers and pipeline callbacks. The zero value is a usable hub
+// with no subscribers, so Options{Hub: &Hub{}} cannot panic.
 type Hub struct {
 	mu   sync.Mutex
 	subs map[chan Event]struct{}
@@ -32,6 +33,9 @@ func NewHub() *Hub {
 func (h *Hub) Subscribe() (chan Event, func()) {
 	ch := make(chan Event, subscriberBuffer)
 	h.mu.Lock()
+	if h.subs == nil {
+		h.subs = make(map[chan Event]struct{})
+	}
 	h.subs[ch] = struct{}{}
 	h.mu.Unlock()
 
@@ -49,6 +53,7 @@ func (h *Hub) Subscribe() (chan Event, func()) {
 
 // Broadcast delivers ev to every subscriber, dropping the event for any
 // subscriber whose buffer is full so one slow client cannot stall the callers.
+// A zero-value Hub has no subscribers, so the nil map is simply empty.
 func (h *Hub) Broadcast(ev Event) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

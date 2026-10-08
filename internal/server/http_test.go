@@ -353,3 +353,90 @@ func TestEventsEndpointStreamsBroadcast(t *testing.T) {
 		t.Fatal("timed out waiting for a broadcast event")
 	}
 }
+
+// TestZeroValueHubIsUsable pins MINOR 4 for the exported Hub type: a caller may
+// pass Options{Hub: &Hub{}} and must not get a nil-map panic out of Subscribe.
+func TestZeroValueHubIsUsable(t *testing.T) {
+	var h Hub
+
+	events, cancel := h.Subscribe()
+	defer cancel()
+	h.Broadcast(Event{Type: "probe", Data: map[string]int{"probed": 1}})
+
+	select {
+	case ev := <-events:
+		if ev.Type != "probe" {
+			t.Fatalf("event type = %q, want probe", ev.Type)
+		}
+	default:
+		t.Fatal("a broadcast to a zero-value Hub's subscriber was dropped")
+	}
+}
+
+// TestZeroValueServerEventsDoesNotPanic pins MINOR 4: a Server that was not
+// built by New has no hub when /api/events arrives, so the handler must create
+// one instead of dereferencing nil.
+func TestZeroValueServerEventsDoesNotPanic(t *testing.T) {
+	var s Server // deliberately not built by New
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Handler().ServeHTTP(rec, req)
+	}()
+	// The stream ends as soon as its request context is cancelled, so a broken
+	// handler fails the wait below instead of hanging the suite.
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleEvents did not return after its request was cancelled")
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("Content-Type = %q, want text/event-stream", ct)
+	}
+}
+
+// TestServerWithNilHubBroadcastsSafely covers the other broadcast path: a Server
+// whose hub was never set (in-package construction, or a New regression) must
+// not panic when a seam result is published.
+func TestServerWithNilHubBroadcastsSafely(t *testing.T) {
+	s := &Server{opts: Options{
+		Probe: func(context.Context, string) (ProbeSummary, error) {
+			return ProbeSummary{Probed: 1}, nil
+		},
+	}}
+
+	rec := serve(t, s, http.MethodPost, "/api/probe", `{"url":"BV1uv411q7Mv"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestEmbeddedUIExposesExportFormats pins MINOR 6: the page must offer every
+// export format and app.js must post the checked subset rather than a
+// hardcoded list.
+func TestEmbeddedUIExposesExportFormats(t *testing.T) {
+	s := newTestServer(t, Options{})
+
+	index := serve(t, s, http.MethodGet, "/", "").Body.String()
+	app := serve(t, s, http.MethodGet, "/app.js", "").Body.String()
+
+	if !strings.Contains(app, "export-format") {
+		t.Error("app.js does not read the export-format checkboxes")
+	}
+	if strings.Contains(app, `["srt"]`) {
+		t.Error("app.js still hardcodes the srt-only export list")
+	}
+	for _, format := range []string{"srt", "txt", "json", "md"} {
+		if !strings.Contains(index, `value="`+format+`"`) {
+			t.Errorf("index.html offers no %q export checkbox", format)
+		}
+	}
+}

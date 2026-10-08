@@ -149,8 +149,20 @@ async function download() {
   }
 }
 
+// selectedFormats reads the format checkboxes the page offers. The server
+// rejects an empty list, so exportZip reports instead of posting one.
+function selectedFormats() {
+  return Array.from(document.querySelectorAll(".export-format"))
+    .filter((box) => box.checked)
+    .map((box) => box.value);
+}
+
 async function exportZip() {
-  const formats = ["srt"];
+  const formats = selectedFormats();
+  if (formats.length === 0) {
+    log("请至少选择一种导出格式。");
+    return;
+  }
   log(`开始导出（${formats.join(",")}）…`);
   try {
     const result = await post("/api/export", { formats });

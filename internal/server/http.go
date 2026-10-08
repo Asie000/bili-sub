@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"bilibili-sub/internal/store"
 )
@@ -44,7 +45,12 @@ type Options struct {
 // Server serves the JSON API, the SSE stream and the embedded UI.
 type Server struct {
 	opts Options
-	hub  *Hub
+
+	// hub is the event hub shared by the broadcasters and /api/events.
+	// hubOnce creates one for a Server that was not built by New, so a
+	// zero-value Server streams instead of panicking on a nil hub.
+	hubOnce sync.Once
+	hub     *Hub
 }
 
 func New(opts Options) *Server {
@@ -52,6 +58,16 @@ func New(opts Options) *Server {
 		opts.Hub = NewHub()
 	}
 	return &Server{opts: opts, hub: opts.Hub}
+}
+
+// eventHub returns the server's event hub, creating it on first use.
+func (s *Server) eventHub() *Hub {
+	s.hubOnce.Do(func() {
+		if s.hub == nil {
+			s.hub = NewHub()
+		}
+	})
+	return s.hub
 }
 
 // Handler builds the route table. Method-specific patterns mean a wrong method
@@ -129,7 +145,7 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.hub.Broadcast(Event{Type: "probe", Data: summary})
+	s.eventHub().Broadcast(Event{Type: "probe", Data: summary})
 	writeJSON(w, http.StatusOK, summary)
 }
 
@@ -151,7 +167,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.hub.Broadcast(Event{Type: "download", Data: summary})
+	s.eventHub().Broadcast(Event{Type: "download", Data: summary})
 	writeJSON(w, http.StatusOK, summary)
 }
 
@@ -176,7 +192,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.hub.Broadcast(Event{Type: "export", Data: map[string]string{"zip": zipPath}})
+	s.eventHub().Broadcast(Event{Type: "export", Data: map[string]string{"zip": zipPath}})
 	writeJSON(w, http.StatusOK, map[string]string{"zip": zipPath})
 }
 
@@ -220,14 +236,15 @@ func (s *Server) handleQRCode(w http.ResponseWriter, r *http.Request) {
 
 // handleEvents streams Hub events as SSE. It subscribes before flushing the
 // response headers so that a client which has received the headers is
-// guaranteed to receive subsequently broadcast events.
+// guaranteed to receive subsequently broadcast events. The hub is created on
+// first use, so a zero-value Server streams rather than panicking.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "当前服务器不支持流式响应")
 		return
 	}
-	events, cancel := s.hub.Subscribe()
+	events, cancel := s.eventHub().Subscribe()
 	defer cancel()
 
 	w.Header().Set("Content-Type", "text/event-stream")

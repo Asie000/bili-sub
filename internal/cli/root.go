@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -51,6 +52,18 @@ func NewRootCmd() *cobra.Command {
 type runtime struct {
 	cfg *config.Config
 	st  *store.Store
+
+	// limiter is the one rate limiter every client of this runtime shares, so
+	// cfg.QPS caps the whole process. A fresh limiter per client (the earlier
+	// behaviour) lets concurrent callers each spend the full budget.
+	limiterOnce sync.Once
+	limiter     bili.Limiter
+
+	// opMu serializes the long pipeline operations the HTTP server exposes.
+	// Probe, download and export all fetch through the same client, so letting
+	// two run at once would multiply the request rate the limiter exists to
+	// cap.
+	opMu sync.Mutex
 }
 
 func newRuntime(cmd *cobra.Command) (*runtime, error) {
@@ -101,8 +114,18 @@ func (r *runtime) subtitleDir() string {
 	return filepath.Join(r.cfg.DataDir, "subtitles")
 }
 
+// rateLimiter returns the limiter shared by every client this runtime builds.
+func (r *runtime) rateLimiter() bili.Limiter {
+	r.limiterOnce.Do(func() {
+		r.limiter = bili.NewRateLimiter(r.cfg.QPS)
+	})
+	return r.limiter
+}
+
 // client builds an API client from the persisted session.json, falling back to
-// the SESSDATA from the config file.
+// the SESSDATA from the config file. The SESSDATA is re-read on every call (the
+// HTTP login endpoint can replace it while the server runs), but the limiter is
+// the runtime's single instance.
 func (r *runtime) client() (*bili.Client, error) {
 	sessdata := r.cfg.SESSDATA
 	saved, err := bili.LoadSESSDATA(r.sessionPath())
@@ -112,7 +135,7 @@ func (r *runtime) client() (*bili.Client, error) {
 	if saved != "" {
 		sessdata = saved
 	}
-	return bili.NewClient(sessdata, bili.NewRateLimiter(r.cfg.QPS)), nil
+	return bili.NewClient(sessdata, r.rateLimiter()), nil
 }
 
 // supportedFormats is the set export.Render can produce; --format rejects
