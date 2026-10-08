@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -125,12 +126,21 @@ func (d *Downloader) FetchSubtitle(ctx context.Context, v store.Video, lang stri
 	if err := os.MkdirAll(d.OutputDir, 0o755); err != nil {
 		return nil, err
 	}
-	srtPath := filepath.Join(d.OutputDir, util.SanitizeFilename(v.Title, v.Bvid)+".srt")
+	// Only multi-page videos get the _P{n} suffix, so pages of one video do not
+	// overwrite each other's .srt.
+	base := util.SanitizeFilename(v.Title, v.Bvid)
+	if v.PageIndex > 1 {
+		base += "_P" + strconv.Itoa(v.PageIndex)
+	}
+	srtPath := filepath.Join(d.OutputDir, base+".srt")
 	if err := os.WriteFile(srtPath, srt, 0o644); err != nil {
 		return nil, err
 	}
 
-	irJSON, err := export.Render(doc, export.FormatJSON)
+	// The transcripts column is the canonical IR (with timeline), so the export
+	// command can rebuild srt from the DB later; export.FormatJSON is a lossy
+	// projection and must not be stored here.
+	irJSON, err := json.Marshal(doc)
 	if err != nil {
 		return nil, err
 	}
@@ -184,8 +194,8 @@ func (d *Downloader) fetchBody(ctx context.Context, rawURL string) ([]ir.Segment
 	segments := make([]ir.Segment, 0, len(body.Body))
 	for _, s := range body.Body {
 		segments = append(segments, ir.Segment{
-			StartMs: int64(s.From * 1000),
-			EndMs:   int64(s.To * 1000),
+			StartMs: int64(math.Round(s.From * 1000)),
+			EndMs:   int64(math.Round(s.To * 1000)),
 			Text:    s.Content,
 		})
 	}

@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,7 +13,6 @@ import (
 	"time"
 
 	"bilibili-sub/internal/bili"
-	"bilibili-sub/internal/export"
 	"bilibili-sub/internal/ir"
 	"bilibili-sub/internal/store"
 	"bilibili-sub/internal/util"
@@ -139,12 +139,95 @@ func TestDownloaderFetchSubtitle(t *testing.T) {
 	if engine != "bilibili" || lang != "zh-CN" {
 		t.Fatalf("transcript engine=%q lang=%q want bilibili/zh-CN", engine, lang)
 	}
-	wantJSON, err := export.Render(doc, export.FormatJSON)
+	// The stored column is the canonical IR, not the lossy export projection: it
+	// must unmarshal back into ir.Document with a non-zero timeline.
+	var stored ir.Document
+	if err := json.Unmarshal([]byte(irJSON), &stored); err != nil {
+		t.Fatalf("unmarshal stored ir_json %s: %v", irJSON, err)
+	}
+	if len(stored.Segments) != len(wantSegments) {
+		t.Fatalf("stored segments=%+v want %+v", stored.Segments, wantSegments)
+	}
+	for i, want := range wantSegments {
+		if stored.Segments[i] != want {
+			t.Fatalf("stored segment[%d]=%+v want %+v", i, stored.Segments[i], want)
+		}
+	}
+	for i, got := range stored.Segments {
+		if got.EndMs == 0 {
+			t.Fatalf("stored segment[%d] lost its timeline: %+v", i, got)
+		}
+	}
+}
+
+// TestDownloaderMultiPageFilenameSuffix: pages after the first must not
+// overwrite page 1's .srt, so PageIndex>1 is appended before the extension.
+func TestDownloaderMultiPageFilenameSuffix(t *testing.T) {
+	st := newTestStore(t)
+	v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 101, Title: "测试视频", Author: "UP主", PageIndex: 2})
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/player":
+			w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle":{"subtitles":[
+				{"lan":"zh-CN","subtitle_url":"` + srv.URL + `/zh.json"}]}}}`))
+		case "/zh.json":
+			w.Write([]byte(subtitleBodyJSON))
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	out := t.TempDir()
+	d := NewDownloader(bili.NewClient("", nopLimiter{}), st, nil, out)
+	d.PlayerBaseURL = srv.URL + "/player"
+
+	if _, err := d.FetchSubtitle(context.Background(), v, "zh-CN"); err != nil {
+		t.Fatal(err)
+	}
+	plain := util.SanitizeFilename(v.Title, v.Bvid)
+	if _, err := os.Stat(filepath.Join(out, plain+"_P2.srt")); err != nil {
+		t.Fatalf("expected %s_P2.srt: %v", plain, err)
+	}
+	if _, err := os.Stat(filepath.Join(out, plain+".srt")); !os.IsNotExist(err) {
+		t.Errorf("unsuffixed srt written for page 2: %v", err)
+	}
+}
+
+// TestDownloaderRoundsSubtitleTimesToMs: from/to are float seconds; the ms
+// conversion must round, not truncate (0.29s → 290ms).
+func TestDownloaderRoundsSubtitleTimesToMs(t *testing.T) {
+	st := newTestStore(t)
+	v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100, Title: "T"})
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/player":
+			w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle":{"subtitles":[
+				{"lan":"zh-CN","subtitle_url":"` + srv.URL + `/zh.json"}]}}}`))
+		case "/zh.json":
+			w.Write([]byte(`{"body":[{"from":0.29,"to":1.999,"content":"x"}]}`))
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	d := NewDownloader(bili.NewClient("", nopLimiter{}), st, nil, t.TempDir())
+	d.PlayerBaseURL = srv.URL + "/player"
+
+	doc, err := d.FetchSubtitle(context.Background(), v, "zh-CN")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if irJSON != string(wantJSON) {
-		t.Fatalf("stored ir_json=%s want %s", irJSON, wantJSON)
+	want := ir.Segment{StartMs: 290, EndMs: 1999, Text: "x"}
+	if len(doc.Segments) != 1 || doc.Segments[0] != want {
+		t.Fatalf("segments=%+v want [%+v]", doc.Segments, want)
 	}
 }
 
