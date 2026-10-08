@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS videos (
 	id INTEGER PRIMARY KEY,
 	bvid TEXT,
 	cid INTEGER,
+	aid INTEGER NOT NULL DEFAULT 0,
 	author TEXT,
 	title TEXT,
 	pubdate INTEGER,

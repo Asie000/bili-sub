@@ -66,9 +66,14 @@ func (e *Enumerator) EnumerateSpace(ctx context.Context, mid string) ([]*bili.Vi
 	var videos []*bili.VideoInfo
 	for pn := 1; ; pn++ {
 		params, err := signer.Sign(map[string]string{
-			"mid": mid,
-			"ps":  strconv.Itoa(spacePageSize),
-			"pn":  strconv.Itoa(pn),
+			"mid":           mid,
+			"ps":            strconv.Itoa(spacePageSize),
+			"pn":            strconv.Itoa(pn),
+			"tid":           "0",
+			"keyword":       "",
+			"order":         "pubdate",
+			"web_location":  "1550101",
+			"order_avoided": "true",
 		})
 		if err != nil {
 			return nil, err
@@ -121,6 +126,7 @@ func (e *Enumerator) EnumerateFav(ctx context.Context, mediaID string) ([]*bili.
 			"media_id": mediaID,
 			"ps":       strconv.Itoa(favPageSize),
 			"pn":       strconv.Itoa(pn),
+			"platform": "web",
 		}
 		if err := e.Client.Get(ctx, e.FavBaseURL, params, &resp); err != nil {
 			return nil, err

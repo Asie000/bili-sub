@@ -56,6 +56,12 @@ func TestNewProberDefaults(t *testing.T) {
 	if p.PlayerBaseURL != "https://api.bilibili.com/x/player/wbi/v2" {
 		t.Fatalf("PlayerBaseURL=%s", p.PlayerBaseURL)
 	}
+	if p.PlayerV2URL != "https://api.bilibili.com/x/player/v2" {
+		t.Fatalf("PlayerV2URL=%s", p.PlayerV2URL)
+	}
+	if p.AISubtitleURL != "https://api.bilibili.com/x/player/v2/ai/subtitle/search/stat" {
+		t.Fatalf("AISubtitleURL=%s", p.AISubtitleURL)
+	}
 }
 
 func TestProbeHasSubtitle(t *testing.T) {
@@ -72,7 +78,7 @@ func TestProbeHasSubtitle(t *testing.T) {
 	defer srv.Close()
 
 	p := NewProber(bili.NewClient("", nopLimiter{}), st, nil)
-	p.PlayerBaseURL = srv.URL
+	p.PlayerV2URL = srv.URL
 
 	res, err := p.ProbeVideo(context.Background(), v)
 	if err != nil {
@@ -109,7 +115,7 @@ func TestProbeNoSubtitle(t *testing.T) {
 	defer srv.Close()
 
 	p := NewProber(bili.NewClient("", nopLimiter{}), st, nil)
-	p.PlayerBaseURL = srv.URL
+	p.PlayerV2URL = srv.URL
 
 	res, err := p.ProbeVideo(context.Background(), v)
 	if err != nil {
@@ -133,7 +139,7 @@ func TestProbeChargingLocked(t *testing.T) {
 	defer srv.Close()
 
 	p := NewProber(bili.NewClient("", nopLimiter{}), st, nil)
-	p.PlayerBaseURL = srv.URL
+	p.PlayerV2URL = srv.URL
 
 	res, err := p.ProbeVideo(context.Background(), v)
 	if err != nil {
@@ -179,7 +185,7 @@ func TestProbeChargingLockedCodes(t *testing.T) {
 			defer srv.Close()
 
 			p := NewProber(bili.NewClient("", nopLimiter{}), st, nil)
-			p.PlayerBaseURL = srv.URL
+			p.PlayerV2URL = srv.URL
 
 			res, err := p.ProbeVideo(context.Background(), v)
 			if c.wantErr {
@@ -232,7 +238,7 @@ func TestProbeErrorLeavesStateUnchanged(t *testing.T) {
 			defer srv.Close()
 
 			p := NewProber(bili.NewClient("", nopLimiter{}), st, nil)
-			p.PlayerBaseURL = srv.URL
+			p.PlayerV2URL = srv.URL
 
 			res, err := p.ProbeVideo(context.Background(), v)
 			if err == nil {
@@ -280,7 +286,7 @@ func TestProbeIgnoresTracksWithoutURL(t *testing.T) {
 	defer srv.Close()
 
 	p := NewProber(bili.NewClient("", nopLimiter{}), st, nil)
-	p.PlayerBaseURL = srv.URL
+	p.PlayerV2URL = srv.URL
 
 	res, err := p.ProbeVideo(context.Background(), v)
 	if err != nil {
@@ -294,21 +300,22 @@ func TestProbeIgnoresTracksWithoutURL(t *testing.T) {
 	}
 }
 
-// TestProbeUsableTrackAmongDanglingOnes: only URL-bearing tracks are offered as
-// langs, so a usable track is still reported when dangling ones are present.
+// TestProbeUsableTrackAmongDanglingOnes: only tracks with a concrete URL are
+// offered as langs, so the default-priority usable track is reported even when a
+// lower-priority dangling one is present.
 func TestProbeUsableTrackAmongDanglingOnes(t *testing.T) {
 	st := newTestStore(t)
 	v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100})
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle":{"subtitles":[
-			{"lan":"zh-CN","lan_doc":"中文（简体）","subtitle_url":""},
-			{"lan":"en-US","lan_doc":"English","subtitle_url":"//aisubtitle.hdslb.com/en.json"}]}}}`))
+			{"lan":"en-US","lan_doc":"English","subtitle_url":""},
+			{"lan":"zh-CN","lan_doc":"中文（简体）","subtitle_url":"//aisubtitle.hdslb.com/zh.json"}]}}}`))
 	}))
 	defer srv.Close()
 
 	p := NewProber(bili.NewClient("", nopLimiter{}), st, nil)
-	p.PlayerBaseURL = srv.URL
+	p.PlayerV2URL = srv.URL
 
 	res, err := p.ProbeVideo(context.Background(), v)
 	if err != nil {
@@ -317,20 +324,159 @@ func TestProbeUsableTrackAmongDanglingOnes(t *testing.T) {
 	if !res.HasSubtitle || !res.CanDownload {
 		t.Fatalf("HasSubtitle=%v CanDownload=%v want true/true", res.HasSubtitle, res.CanDownload)
 	}
-	if len(res.Langs) != 1 || res.Langs[0].Lan != "en-US" {
-		t.Fatalf("langs=%+v want only en-US", res.Langs)
+	if len(res.Langs) != 1 || res.Langs[0].Lan != "zh-CN" {
+		t.Fatalf("langs=%+v want only zh-CN", res.Langs)
 	}
 	got := videoByID(t, st, v.ID)
-	if got.State != store.StateDownloadable || got.Lang != "en-US" {
-		t.Fatalf("state=%q lang=%q want %q/en-US", got.State, got.Lang, store.StateDownloadable)
+	if got.State != store.StateDownloadable || got.Lang != "zh-CN" {
+		t.Fatalf("state=%q lang=%q want %q/zh-CN", got.State, got.Lang, store.StateDownloadable)
 	}
+}
+
+// TestProbeAISubtitleFallback: an ai-* track whose subtitle_url is empty is not
+// dropped; its real URL comes from the AI subtitle stat endpoint.
+func TestProbeAISubtitleFallback(t *testing.T) {
+	st := newTestStore(t)
+	v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100, Aid: 42})
+
+	playerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle":{"subtitles":[
+			{"lan":"ai-zh","lan_doc":"中文（AI）","subtitle_url":""}]}}}`))
+	}))
+	defer playerSrv.Close()
+
+	aiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("aid") != "42" || q.Get("cid") != "100" {
+			t.Errorf("ai stat params aid=%q cid=%q want 42/100", q.Get("aid"), q.Get("cid"))
+		}
+		w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle_url":"//aisubtitle.hdslb.com/ai.json"}}`))
+	}))
+	defer aiSrv.Close()
+
+	p := NewProber(bili.NewClient("", nopLimiter{}), st, nil)
+	p.PlayerBaseURL = playerSrv.URL
+	p.AISubtitleURL = aiSrv.URL
+
+	res, err := p.ProbeVideo(context.Background(), v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.HasSubtitle || !res.CanDownload {
+		t.Fatalf("HasSubtitle=%v CanDownload=%v want true/true", res.HasSubtitle, res.CanDownload)
+	}
+	if len(res.Langs) != 1 || res.Langs[0].Lan != "ai-zh" || res.Langs[0].SubURL != "//aisubtitle.hdslb.com/ai.json" {
+		t.Fatalf("langs=%+v want ai-zh with resolved URL", res.Langs)
+	}
+	got := videoByID(t, st, v.ID)
+	if got.State != store.StateDownloadable || got.Lang != "ai-zh" {
+		t.Fatalf("state=%q lang=%q want %q/ai-zh", got.State, got.Lang, store.StateDownloadable)
+	}
+}
+
+// TestProbeAISubtitleRequiresAid: without an aid the AI stat endpoint cannot be
+// called, so an ai-* track with an empty URL is still no_subtitle.
+func TestProbeAISubtitleRequiresAid(t *testing.T) {
+	st := newTestStore(t)
+	v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle":{"subtitles":[
+			{"lan":"ai-zh","lan_doc":"中文（AI）","subtitle_url":""}]}}}`))
+	}))
+	defer srv.Close()
+
+	p := NewProber(bili.NewClient("", nopLimiter{}), st, nil)
+	p.PlayerV2URL = srv.URL
+
+	res, err := p.ProbeVideo(context.Background(), v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.HasSubtitle || res.CanDownload || len(res.Langs) != 0 {
+		t.Fatalf("res=%+v want no subtitle", res)
+	}
+	if got := videoByID(t, st, v.ID); got.State != store.StateNoSubtitle {
+		t.Fatalf("state=%q want %q", got.State, store.StateNoSubtitle)
+	}
+}
+
+// TestProbeEndpointSelection pins the player endpoint choice: a known aid uses
+// the WBI endpoint with aid+cid, while an unknown aid falls back to the
+// unsigned x/player/v2 with cid+bvid.
+func TestProbeEndpointSelection(t *testing.T) {
+	t.Run("aid uses wbi endpoint", func(t *testing.T) {
+		st := newTestStore(t)
+		v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100, Aid: 42})
+
+		wbiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			q := r.URL.Query()
+			if q.Get("aid") != "42" || q.Get("cid") != "100" {
+				t.Errorf("wbi params aid=%q cid=%q want 42/100", q.Get("aid"), q.Get("cid"))
+			}
+			if q.Has("bvid") {
+				t.Errorf("wbi request carried bvid=%q, want aid only", q.Get("bvid"))
+			}
+			w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle":{"subtitles":[]}}}`))
+		}))
+		defer wbiSrv.Close()
+		v2Srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("player/v2 endpoint hit for a video with an aid")
+			w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle":{"subtitles":[]}}}`))
+		}))
+		defer v2Srv.Close()
+
+		p := NewProber(bili.NewClient("", nopLimiter{}), st, nil)
+		p.PlayerBaseURL = wbiSrv.URL
+		p.PlayerV2URL = v2Srv.URL
+
+		if _, err := p.ProbeVideo(context.Background(), v); err != nil {
+			t.Fatal(err)
+		}
+		if got := videoByID(t, st, v.ID); got.State != store.StateNoSubtitle {
+			t.Fatalf("state=%q want %q", got.State, store.StateNoSubtitle)
+		}
+	})
+
+	t.Run("no aid uses player v2 endpoint", func(t *testing.T) {
+		st := newTestStore(t)
+		v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100})
+
+		wbiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("wbi endpoint hit for a video without an aid")
+			w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle":{"subtitles":[]}}}`))
+		}))
+		defer wbiSrv.Close()
+		v2Srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			q := r.URL.Query()
+			if q.Get("cid") != "100" || q.Get("bvid") != "BV1uv411q7Mv" {
+				t.Errorf("v2 params cid=%q bvid=%q want 100/BV1uv411q7Mv", q.Get("cid"), q.Get("bvid"))
+			}
+			if q.Has("aid") {
+				t.Errorf("v2 request carried aid=%q, want cid+bvid only", q.Get("aid"))
+			}
+			w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle":{"subtitles":[]}}}`))
+		}))
+		defer v2Srv.Close()
+
+		p := NewProber(bili.NewClient("", nopLimiter{}), st, nil)
+		p.PlayerBaseURL = wbiSrv.URL
+		p.PlayerV2URL = v2Srv.URL
+
+		if _, err := p.ProbeVideo(context.Background(), v); err != nil {
+			t.Fatal(err)
+		}
+		if got := videoByID(t, st, v.ID); got.State != store.StateNoSubtitle {
+			t.Fatalf("state=%q want %q", got.State, store.StateNoSubtitle)
+		}
+	})
 }
 
 // TestProbeSignsParams checks the player request is WBI-signed when a signer is
 // available, by re-signing what reached the stub server.
 func TestProbeSignsParams(t *testing.T) {
 	st := newTestStore(t)
-	v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100})
+	v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100, Aid: 42})
 
 	navSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"code":0,"message":"0","data":{"wbi_img":{"img_url":"https://i0.hdslb.com/bfs/wbi/` + testImgKey + `.png","sub_url":"https://i0.hdslb.com/bfs/wbi/` + testSubKey + `.png"}}}`))

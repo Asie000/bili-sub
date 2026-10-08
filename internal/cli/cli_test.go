@@ -371,6 +371,7 @@ func TestExpandPages(t *testing.T) {
 	t.Run("multi page", func(t *testing.T) {
 		vi := &bili.VideoInfo{
 			Bvid:     "BV1uv411q7Mv",
+			Aid:      42,
 			Cid:      99,
 			Title:    "合集",
 			Pubdate:  1700000000,
@@ -381,15 +382,15 @@ func TestExpandPages(t *testing.T) {
 				{Cid: 2, Page: 2, Part: "第二集"},
 			},
 		}
-		vi.Rights.IsUpowerExclusive = true
+		vi.IsUpowerPlay = true
 
 		got := expandPages(vi, "12345")
 		if len(got) != 2 {
 			t.Fatalf("expandPages len = %d, want 2", len(got))
 		}
 		want := []store.Video{
-			{Bvid: "BV1uv411q7Mv", Cid: 1, Author: "某UP", Title: "合集", Pubdate: 1700000000, Duration: 600, PageIndex: 1, Part: "第一集", IsCharging: true, State: store.StatePending, SourceKey: "12345"},
-			{Bvid: "BV1uv411q7Mv", Cid: 2, Author: "某UP", Title: "合集", Pubdate: 1700000000, Duration: 600, PageIndex: 2, Part: "第二集", IsCharging: true, State: store.StatePending, SourceKey: "12345"},
+			{Bvid: "BV1uv411q7Mv", Aid: 42, Cid: 1, Author: "某UP", Title: "合集", Pubdate: 1700000000, Duration: 600, PageIndex: 1, Part: "第一集", IsCharging: true, State: store.StatePending, SourceKey: "12345"},
+			{Bvid: "BV1uv411q7Mv", Aid: 42, Cid: 2, Author: "某UP", Title: "合集", Pubdate: 1700000000, Duration: 600, PageIndex: 2, Part: "第二集", IsCharging: true, State: store.StatePending, SourceKey: "12345"},
 		}
 		for i := range want {
 			if got[i] != want[i] {
@@ -399,8 +400,8 @@ func TestExpandPages(t *testing.T) {
 	})
 
 	t.Run("no pages falls back to video cid", func(t *testing.T) {
-		vi := &bili.VideoInfo{Bvid: "BV1xx411c7mD", Cid: 7, Title: "单P"}
-		vi.IsUpowerExclusive = true
+		vi := &bili.VideoInfo{Bvid: "BV1xx411c7mD", Aid: 7, Cid: 7, Title: "单P"}
+		vi.IsUpowerPreview = true
 
 		got := expandPages(vi, "BV1xx411c7mD")
 		if len(got) != 1 {
@@ -408,6 +409,12 @@ func TestExpandPages(t *testing.T) {
 		}
 		if got[0].Cid != 7 || got[0].PageIndex != 1 || got[0].Part != "" {
 			t.Errorf("video = %+v, want cid=7 page=1 part=\"\"", got[0])
+		}
+		if got[0].Aid != 7 {
+			t.Errorf("Aid = %d, want 7", got[0].Aid)
+		}
+		if !got[0].IsCharging {
+			t.Errorf("IsCharging = false, want true (is_upower_preview)")
 		}
 		if got[0].State != store.StatePending {
 			t.Errorf("State = %q, want %q", got[0].State, store.StatePending)

@@ -121,6 +121,9 @@ func TestEnumerateFav(t *testing.T) {
 		if q.Get("ps") != "20" {
 			t.Errorf("ps=%q", q.Get("ps"))
 		}
+		if q.Get("platform") != "web" {
+			t.Errorf("platform=%q want web", q.Get("platform"))
+		}
 		pn := q.Get("pn")
 		mu.Lock()
 		pages = append(pages, pn)
@@ -196,6 +199,21 @@ func TestEnumerateSpace(t *testing.T) {
 		}
 		if q.Get("ps") != "30" {
 			t.Errorf("ps=%q", q.Get("ps"))
+		}
+		if q.Get("tid") != "0" {
+			t.Errorf("tid=%q want 0", q.Get("tid"))
+		}
+		if !q.Has("keyword") || q.Get("keyword") != "" {
+			t.Errorf("keyword=%q (present=%v) want an empty keyword", q.Get("keyword"), q.Has("keyword"))
+		}
+		if q.Get("order") != "pubdate" {
+			t.Errorf("order=%q want pubdate", q.Get("order"))
+		}
+		if q.Get("web_location") != "1550101" {
+			t.Errorf("web_location=%q want 1550101", q.Get("web_location"))
+		}
+		if q.Get("order_avoided") != "true" {
+			t.Errorf("order_avoided=%q want true", q.Get("order_avoided"))
 		}
 		gotRid, gotWts := q.Get("w_rid"), q.Get("wts")
 		if gotRid == "" || gotWts == "" {

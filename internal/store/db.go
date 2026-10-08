@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -41,7 +42,24 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
+}
+
+// migrate brings a database created before the aid column existed up to date.
+// Adding an already-present column is the only error tolerated: it is how an
+// idempotent re-open looks, and any other failure is real.
+func migrate(db *sql.DB) error {
+	if _, err := db.Exec(`ALTER TABLE videos ADD COLUMN aid INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if strings.Contains(err.Error(), "duplicate column name") {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }

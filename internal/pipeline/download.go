@@ -42,6 +42,8 @@ type Downloader struct {
 	Store         *store.Store
 	Enumerator    *Enumerator // for the WBI signer (may be nil)
 	PlayerBaseURL string      // default https://api.bilibili.com/x/player/wbi/v2
+	PlayerV2URL   string      // default bili.PlayerV2URL
+	AISubtitleURL string      // default bili.AISubtitleStatURL
 	OutputDir     string
 	HTTP          *http.Client // for the subtitle body; default a 30s client
 }
@@ -52,9 +54,15 @@ func NewDownloader(c *bili.Client, st *store.Store, en *Enumerator, outputDir st
 		Store:         st,
 		Enumerator:    en,
 		PlayerBaseURL: defaultPlayerBaseURL,
+		PlayerV2URL:   bili.PlayerV2URL,
+		AISubtitleURL: bili.AISubtitleStatURL,
 		OutputDir:     outputDir,
 		HTTP:          &http.Client{Timeout: subtitleHTTPTimeout},
 	}
+}
+
+func (d *Downloader) playerRequest() playerRequest {
+	return playerRequest{d.Client, d.Enumerator, d.PlayerBaseURL, d.PlayerV2URL, d.AISubtitleURL}
 }
 
 // FetchSubtitle downloads the best-matching subtitle track for v, writes the
@@ -69,40 +77,12 @@ func (d *Downloader) FetchSubtitle(ctx context.Context, v store.Video, lang stri
 		return nil, errors.New("pipeline: Downloader needs a non-nil Client and Store")
 	}
 
-	params := map[string]string{
-		"bvid": v.Bvid,
-		"cid":  strconv.FormatInt(v.Cid, 10),
-	}
-	if d.Enumerator != nil {
-		signer, err := d.Enumerator.Signer(ctx)
-		if err != nil {
-			return nil, err
-		}
-		params, err = signer.Sign(params)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	var resp struct {
-		Subtitle struct {
-			Subtitles []bili.SubtitleInfo `json:"subtitles"`
-		} `json:"subtitle"`
-	}
-	if err := d.Client.Get(ctx, d.PlayerBaseURL, params, &resp); err != nil {
+	track, _, ok, err := resolveSubtitleTrack(ctx, d.playerRequest(), v, lang)
+	if err != nil {
 		return nil, err
 	}
-
-	// A track without a URL cannot be fetched, so it must not win PickLang.
-	usable := make([]bili.SubtitleInfo, 0, len(resp.Subtitle.Subtitles))
-	for _, s := range resp.Subtitle.Subtitles {
-		if s.SubURL != "" {
-			usable = append(usable, s)
-		}
-	}
-	track, ok := PickLang(usable, lang)
 	if !ok {
-		return nil, fmt.Errorf("pipeline: no subtitle track for %s with lang=%q (%d usable tracks)", v.Bvid, lang, len(usable))
+		return nil, fmt.Errorf("pipeline: no subtitle track for %s with lang=%q", v.Bvid, lang)
 	}
 
 	segments, err := d.fetchBody(ctx, track.SubURL)
@@ -153,13 +133,25 @@ func (d *Downloader) FetchSubtitle(ctx context.Context, v store.Video, lang stri
 	return doc, nil
 }
 
-// fetchBody downloads and decodes one subtitle track. Its URL is
-// protocol-relative in real responses ("//aisubtitle.hdslb.com/..."), so it is
-// upgraded to https before the request.
-func (d *Downloader) fetchBody(ctx context.Context, rawURL string) ([]ir.Segment, error) {
-	if strings.HasPrefix(rawURL, "//") {
-		rawURL = "https:" + rawURL
+// normalizeSubtitleURL turns the three URL forms B站 serves into a fetchable
+// absolute URL: a protocol-relative URL ("//host/...") gets an https: prefix, an
+// existing http(s):// scheme is kept, and a scheme-less "host/..." gets https://.
+func normalizeSubtitleURL(raw string) string {
+	switch {
+	case strings.HasPrefix(raw, "//"):
+		return "https:" + raw
+	case strings.HasPrefix(raw, "http://"), strings.HasPrefix(raw, "https://"):
+		return raw
+	default:
+		return "https://" + raw
 	}
+}
+
+// fetchBody downloads and decodes one subtitle track. Its URL may be
+// protocol-relative in real responses ("//aisubtitle.hdslb.com/..."), so it is
+// normalized to an absolute https URL before the request.
+func (d *Downloader) fetchBody(ctx context.Context, rawURL string) ([]ir.Segment, error) {
+	rawURL = normalizeSubtitleURL(rawURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err

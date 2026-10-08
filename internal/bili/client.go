@@ -14,6 +14,14 @@ const (
 	referer   = "https://www.bilibili.com"
 )
 
+// PlayerV2URL is the unsigned player endpoint used when a video's aid is
+// unknown; AISubtitleStatURL resolves the real subtitle_url for AI-only tracks
+// whose list entry has an empty subtitle_url.
+const (
+	PlayerV2URL       = "https://api.bilibili.com/x/player/v2"
+	AISubtitleStatURL = "https://api.bilibili.com/x/player/v2/ai/subtitle/search/stat"
+)
+
 type Limiter interface {
 	Wait(ctx context.Context) error
 }

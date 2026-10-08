@@ -326,7 +326,7 @@ func requestURL(r *http.Request) string {
 // e2eExpandPages mirrors cli.expandPages (Ruling F): one store.Video per page,
 // or a single page using the video-level cid when the video has no pages list.
 func e2eExpandPages(vi *bili.VideoInfo, sourceKey string) []store.Video {
-	charging := vi.IsUpowerExclusive || vi.Rights.IsUpowerExclusive
+	charging := vi.IsUpowerExclusive || vi.Rights.IsUpowerExclusive || vi.IsUpowerPlay || vi.IsUpowerPreview
 	pages := vi.Pages
 	if len(pages) == 0 {
 		pages = []bili.PageInfo{{Cid: vi.Cid, Page: 1}}
@@ -336,6 +336,7 @@ func e2eExpandPages(vi *bili.VideoInfo, sourceKey string) []store.Video {
 		out = append(out, store.Video{
 			Bvid:       vi.Bvid,
 			Cid:        p.Cid,
+			Aid:        vi.Aid,
 			Author:     vi.Owner.Name,
 			Title:      vi.Title,
 			Pubdate:    vi.Pubdate,

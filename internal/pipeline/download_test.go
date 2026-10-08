@@ -50,6 +50,12 @@ func TestNewDownloaderDefaults(t *testing.T) {
 	if d.PlayerBaseURL != "https://api.bilibili.com/x/player/wbi/v2" {
 		t.Fatalf("PlayerBaseURL=%s", d.PlayerBaseURL)
 	}
+	if d.PlayerV2URL != "https://api.bilibili.com/x/player/v2" {
+		t.Fatalf("PlayerV2URL=%s", d.PlayerV2URL)
+	}
+	if d.AISubtitleURL != "https://api.bilibili.com/x/player/v2/ai/subtitle/search/stat" {
+		t.Fatalf("AISubtitleURL=%s", d.AISubtitleURL)
+	}
 	if d.HTTP == nil || d.HTTP.Timeout != 30*time.Second {
 		t.Fatalf("HTTP=%+v want a 30s client", d.HTTP)
 	}
@@ -84,7 +90,7 @@ func TestDownloaderFetchSubtitle(t *testing.T) {
 
 	out := t.TempDir()
 	d := NewDownloader(bili.NewClient("", nopLimiter{}), st, nil, out)
-	d.PlayerBaseURL = srv.URL + "/x/player/wbi/v2"
+	d.PlayerV2URL = srv.URL + "/x/player/wbi/v2"
 
 	doc, err := d.FetchSubtitle(context.Background(), v, "")
 	if err != nil {
@@ -183,7 +189,7 @@ func TestDownloaderMultiPageFilenameSuffix(t *testing.T) {
 
 	out := t.TempDir()
 	d := NewDownloader(bili.NewClient("", nopLimiter{}), st, nil, out)
-	d.PlayerBaseURL = srv.URL + "/player"
+	d.PlayerV2URL = srv.URL + "/player"
 
 	if _, err := d.FetchSubtitle(context.Background(), v, "zh-CN"); err != nil {
 		t.Fatal(err)
@@ -219,7 +225,7 @@ func TestDownloaderRoundsSubtitleTimesToMs(t *testing.T) {
 	defer srv.Close()
 
 	d := NewDownloader(bili.NewClient("", nopLimiter{}), st, nil, t.TempDir())
-	d.PlayerBaseURL = srv.URL + "/player"
+	d.PlayerV2URL = srv.URL + "/player"
 
 	doc, err := d.FetchSubtitle(context.Background(), v, "zh-CN")
 	if err != nil {
@@ -254,7 +260,7 @@ func TestDownloaderNormalizesProtocolRelativeURL(t *testing.T) {
 
 	rt := &schemeRewriteTransport{}
 	d := NewDownloader(bili.NewClient("", nopLimiter{}), st, nil, t.TempDir())
-	d.PlayerBaseURL = srv.URL + "/player"
+	d.PlayerV2URL = srv.URL + "/player"
 	d.HTTP = &http.Client{Transport: rt}
 
 	doc, err := d.FetchSubtitle(context.Background(), v, "zh-CN")
@@ -271,6 +277,107 @@ func TestDownloaderNormalizesProtocolRelativeURL(t *testing.T) {
 	want := "https://" + strings.TrimPrefix(srv.URL, "http://") + "/zh.json"
 	if reqs[0] != want {
 		t.Fatalf("fetched %q want %q", reqs[0], want)
+	}
+}
+
+// TestDownloaderNormalizesSchemeLessURL: some subtitle URLs arrive without any
+// scheme ("host/path"); the downloader must prefix https:// before fetching.
+func TestDownloaderNormalizesSchemeLessURL(t *testing.T) {
+	st := newTestStore(t)
+	v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100, Title: "T"})
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/player":
+			w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle":{"subtitles":[
+				{"lan":"zh-CN","subtitle_url":"` + r.Host + `/zh.json"}]}}}`))
+		case "/zh.json":
+			w.Write([]byte(subtitleBodyJSON))
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	rt := &schemeRewriteTransport{}
+	d := NewDownloader(bili.NewClient("", nopLimiter{}), st, nil, t.TempDir())
+	d.PlayerV2URL = srv.URL + "/player"
+	d.HTTP = &http.Client{Transport: rt}
+
+	if _, err := d.FetchSubtitle(context.Background(), v, "zh-CN"); err != nil {
+		t.Fatal(err)
+	}
+	reqs := rt.requested()
+	if len(reqs) != 1 {
+		t.Fatalf("subtitle requests=%v want exactly one", reqs)
+	}
+	want := "https://" + strings.TrimPrefix(srv.URL, "http://") + "/zh.json"
+	if reqs[0] != want {
+		t.Fatalf("fetched %q want %q", reqs[0], want)
+	}
+}
+
+// TestNormalizeSubtitleURL pins the three URL forms B站 serves.
+func TestNormalizeSubtitleURL(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"//aisubtitle.hdslb.com/a.json", "https://aisubtitle.hdslb.com/a.json"},
+		{"http://aisubtitle.hdslb.com/a.json", "http://aisubtitle.hdslb.com/a.json"},
+		{"https://aisubtitle.hdslb.com/a.json", "https://aisubtitle.hdslb.com/a.json"},
+		{"aisubtitle.hdslb.com/a.json", "https://aisubtitle.hdslb.com/a.json"},
+	}
+	for _, c := range cases {
+		if got := normalizeSubtitleURL(c.in); got != c.want {
+			t.Errorf("normalizeSubtitleURL(%q)=%q want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestDownloaderAISubtitleFallback: the downloader resolves an ai-* track's
+// empty subtitle_url through the AI subtitle stat endpoint before fetching the
+// body, so AI-only videos are downloadable.
+func TestDownloaderAISubtitleFallback(t *testing.T) {
+	st := newTestStore(t)
+	v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100, Aid: 42, Title: "测试视频", Author: "UP主"})
+
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/player":
+			w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle":{"subtitles":[
+				{"lan":"ai-zh","lan_doc":"中文（AI）","subtitle_url":""}]}}}`))
+		case "/ai-stat":
+			q := r.URL.Query()
+			if q.Get("aid") != "42" || q.Get("cid") != "100" {
+				t.Errorf("ai stat params aid=%q cid=%q want 42/100", q.Get("aid"), q.Get("cid"))
+			}
+			w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle_url":"` + srv.URL + `/ai.json"}}`))
+		case "/ai.json":
+			w.Write([]byte(subtitleBodyJSON))
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	d := NewDownloader(bili.NewClient("", nopLimiter{}), st, nil, t.TempDir())
+	d.PlayerBaseURL = srv.URL + "/player"
+	d.AISubtitleURL = srv.URL + "/ai-stat"
+
+	doc, err := d.FetchSubtitle(context.Background(), v, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Lang != "ai-zh" {
+		t.Fatalf("lang=%q want ai-zh", doc.Lang)
+	}
+	if len(doc.Segments) != 2 {
+		t.Fatalf("segments=%+v want 2", doc.Segments)
+	}
+	if got := videoByID(t, st, v.ID); got.State != store.StateFetched || got.Lang != "ai-zh" {
+		t.Fatalf("state=%q lang=%q want %q/ai-zh", got.State, got.Lang, store.StateFetched)
 	}
 }
 
@@ -314,7 +421,7 @@ func TestDownloaderNoUsableTrackLeavesStateUnchanged(t *testing.T) {
 
 			out := t.TempDir()
 			d := NewDownloader(bili.NewClient("", nopLimiter{}), st, nil, out)
-			d.PlayerBaseURL = srv.URL + "/player"
+			d.PlayerV2URL = srv.URL + "/player"
 
 			doc, err := d.FetchSubtitle(context.Background(), v, c.pref)
 			if err == nil {
@@ -344,7 +451,7 @@ func TestDownloaderNoUsableTrackLeavesStateUnchanged(t *testing.T) {
 // an Enumerator is wired in, by re-signing what reached the stub server.
 func TestDownloaderSignsPlayerParams(t *testing.T) {
 	st := newTestStore(t)
-	v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100, Title: "T"})
+	v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100, Aid: 42, Title: "T"})
 
 	navSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"code":0,"message":"0","data":{"wbi_img":{"img_url":"https://i0.hdslb.com/bfs/wbi/` + testImgKey + `.png","sub_url":"https://i0.hdslb.com/bfs/wbi/` + testSubKey + `.png"}}}`))
@@ -433,7 +540,7 @@ func TestDownloaderInvalidSubtitleJSON(t *testing.T) {
 	defer srv.Close()
 
 	d := NewDownloader(bili.NewClient("", nopLimiter{}), st, nil, t.TempDir())
-	d.PlayerBaseURL = srv.URL + "/player"
+	d.PlayerV2URL = srv.URL + "/player"
 
 	if _, err := d.FetchSubtitle(context.Background(), v, "zh-CN"); err == nil {
 		t.Fatal("err=nil want decode error")

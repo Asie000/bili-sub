@@ -10,6 +10,8 @@ type VideoInfo struct {
 	Owner             Owner      `json:"owner"`
 	Pages             []PageInfo `json:"pages"`
 	IsUpowerExclusive bool       `json:"is_upower_exclusive"`
+	IsUpowerPlay      bool       `json:"is_upower_play"`
+	IsUpowerPreview   bool       `json:"is_upower_preview"`
 	Rights            struct {
 		IsUpowerExclusive bool `json:"is_upower_exclusive"`
 	} `json:"rights"`

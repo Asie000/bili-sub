@@ -170,7 +170,7 @@ func collectVideos(ctx context.Context, en *pipeline.Enumerator, kind pipeline.S
 // probed and downloaded page by page, so each page needs its own row. Videos
 // without a pages list are a single page using the video-level cid.
 func expandPages(vi *bili.VideoInfo, sourceKey string) []store.Video {
-	charging := vi.IsUpowerExclusive || vi.Rights.IsUpowerExclusive
+	charging := vi.IsUpowerExclusive || vi.Rights.IsUpowerExclusive || vi.IsUpowerPlay || vi.IsUpowerPreview
 	pages := vi.Pages
 	if len(pages) == 0 {
 		pages = []bili.PageInfo{{Cid: vi.Cid, Page: 1}}
@@ -180,6 +180,7 @@ func expandPages(vi *bili.VideoInfo, sourceKey string) []store.Video {
 		out = append(out, store.Video{
 			Bvid:       vi.Bvid,
 			Cid:        p.Cid,
+			Aid:        vi.Aid,
 			Author:     vi.Owner.Name,
 			Title:      vi.Title,
 			Pubdate:    vi.Pubdate,

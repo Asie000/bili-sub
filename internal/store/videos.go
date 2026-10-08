@@ -6,6 +6,7 @@ type Video struct {
 	ID         int64
 	Bvid       string
 	Cid        int64
+	Aid        int64
 	Author     string
 	Title      string
 	Pubdate    int64
@@ -20,13 +21,14 @@ type Video struct {
 
 func (s *Store) UpsertVideo(v *Video) (int64, error) {
 	_, err := s.db.Exec(`
-		INSERT INTO videos (bvid,cid,author,title,pubdate,duration,page_index,part,is_charging,state,lang,source_key)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+		INSERT INTO videos (bvid,cid,aid,author,title,pubdate,duration,page_index,part,is_charging,state,lang,source_key)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(bvid,cid) DO UPDATE SET
+			aid=excluded.aid,
 			author=excluded.author, title=excluded.title, pubdate=excluded.pubdate,
 			duration=excluded.duration, page_index=excluded.page_index, part=excluded.part,
 			is_charging=excluded.is_charging, source_key=excluded.source_key`,
-		v.Bvid, v.Cid, v.Author, v.Title, v.Pubdate, v.Duration, v.PageIndex, v.Part, boolToInt(v.IsCharging), v.State, v.Lang, v.SourceKey)
+		v.Bvid, v.Cid, v.Aid, v.Author, v.Title, v.Pubdate, v.Duration, v.PageIndex, v.Part, boolToInt(v.IsCharging), v.State, v.Lang, v.SourceKey)
 	if err != nil {
 		return 0, err
 	}
@@ -36,7 +38,7 @@ func (s *Store) UpsertVideo(v *Video) (int64, error) {
 }
 
 func (s *Store) ListVideos(state string) ([]Video, error) {
-	q := `SELECT id,bvid,cid,author,title,pubdate,duration,page_index,part,is_charging,state,lang,source_key FROM videos`
+	q := `SELECT id,bvid,cid,aid,author,title,pubdate,duration,page_index,part,is_charging,state,lang,source_key FROM videos`
 	order := ` ORDER BY id`
 	var rows *sql.Rows
 	var err error
@@ -52,7 +54,7 @@ func (s *Store) ListVideos(state string) ([]Video, error) {
 	var out []Video
 	for rows.Next() {
 		var v Video
-		if err := rows.Scan(&v.ID, &v.Bvid, &v.Cid, &v.Author, &v.Title, &v.Pubdate, &v.Duration, &v.PageIndex, &v.Part, &v.IsCharging, &v.State, &v.Lang, &v.SourceKey); err != nil {
+		if err := rows.Scan(&v.ID, &v.Bvid, &v.Cid, &v.Aid, &v.Author, &v.Title, &v.Pubdate, &v.Duration, &v.PageIndex, &v.Part, &v.IsCharging, &v.State, &v.Lang, &v.SourceKey); err != nil {
 			return nil, err
 		}
 		out = append(out, v)

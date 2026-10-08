@@ -208,3 +208,127 @@ func TestSaveTranscriptRoundTrip(t *testing.T) {
 		t.Fatalf("want sql.ErrNoRows, got %v", err)
 	}
 }
+
+func TestUpsertAidRoundTrip(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	v := &Video{Bvid: "BV1", Cid: 1, Aid: 42, State: StatePending}
+	if _, err := s.UpsertVideo(v); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListVideos("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Aid != 42 {
+		t.Fatalf("aid did not round trip: %+v", got)
+	}
+
+	// The ON CONFLICT update must also carry the new column.
+	v.Aid = 43
+	if _, err := s.UpsertVideo(v); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.ListVideos("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Aid != 43 {
+		t.Fatalf("aid did not update: %+v", got)
+	}
+}
+
+// TestOpenIdempotent opens the same file-backed database twice: the second open
+// re-runs the schema and the aid migration, which must treat the already-present
+// column as a no-op instead of failing.
+func TestOpenIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.db")
+	for i := 0; i < 2; i++ {
+		s, err := Open(path)
+		if err != nil {
+			t.Fatalf("open %d: %v", i, err)
+		}
+		if _, err := s.UpsertVideo(&Video{Bvid: "BV1", Cid: 1, Aid: 7, State: StatePending}); err != nil {
+			s.Close()
+			t.Fatalf("open %d: upsert: %v", i, err)
+		}
+		got, err := s.ListVideos("")
+		if err != nil {
+			s.Close()
+			t.Fatalf("open %d: list: %v", i, err)
+		}
+		if len(got) != 1 || got[0].Aid != 7 {
+			s.Close()
+			t.Fatalf("open %d: got %+v want one row with aid=7", i, got)
+		}
+		s.Close()
+	}
+}
+
+// TestOpenMigratesLegacyVideosTable writes a database with the pre-aid schema,
+// then opens it with the current code and checks the aid column was added.
+func TestOpenMigratesLegacyVideosTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE videos (
+		id INTEGER PRIMARY KEY,
+		bvid TEXT,
+		cid INTEGER,
+		author TEXT,
+		title TEXT,
+		pubdate INTEGER,
+		duration INTEGER,
+		page_index INTEGER,
+		part TEXT,
+		is_charging INTEGER NOT NULL DEFAULT 0,
+		state TEXT,
+		lang TEXT,
+		source_key TEXT,
+		UNIQUE(bvid,cid)
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO videos (bvid,cid,author,title,pubdate,duration,page_index,part,is_charging,state,lang,source_key) VALUES ('BV1',1,'','',0,0,0,'',0,'pending','','')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open legacy db: %v", err)
+	}
+	defer s.Close()
+
+	got, err := s.ListVideos("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Aid != 0 {
+		t.Fatalf("legacy row after migration=%+v want one row with aid=0", got)
+	}
+	if _, err := s.UpsertVideo(&Video{Bvid: "BV2", Cid: 2, Aid: 9, State: StatePending}); err != nil {
+		t.Fatalf("upsert with aid after migration: %v", err)
+	}
+	got, err = s.ListVideos("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, v := range got {
+		if v.Bvid == "BV2" && v.Aid == 9 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("migrated table did not store aid: %+v", got)
+	}
+}
