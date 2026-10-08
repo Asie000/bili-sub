@@ -142,7 +142,7 @@ function renderTable(items) {
   }
   items.forEach((v, i) => {
     const row = tbody.insertRow();
-    row.insertCell().textContent = i + 1;
+    row.insertCell().textContent = pageOffset + i + 1;
     row.insertCell().textContent = formatTitle(v);
     row.insertCell().textContent = v.Author || "-";
     row.insertCell().textContent = formatPubdate(v.Pubdate);
@@ -164,8 +164,15 @@ async function loadVideos() {
     params.set("offset", String(pageOffset));
     params.set("limit", String(PAGE_SIZE));
     const data = await api(`/api/videos?${params.toString()}`);
-    renderTable(data.items);
     pageTotal = data.total;
+    // The filter can change under us (显示全部来源, 清空数据, a remote reset).
+    // If the current page is now past the end, fall back to the last real page
+    // instead of rendering an empty table with a reversed range.
+    if (data.items.length === 0 && pageTotal > 0 && pageOffset > 0) {
+      pageOffset = Math.floor((pageTotal - 1) / PAGE_SIZE) * PAGE_SIZE;
+      return loadVideos();
+    }
+    renderTable(data.items);
     updatePager();
     await loadStats();
   } catch (err) {
@@ -181,7 +188,7 @@ function updatePager() {
   if (pageTotal === 0) {
     info.textContent = "共 0 条";
   } else {
-    const start = pageOffset + 1;
+    const start = Math.min(pageOffset + 1, pageTotal);
     const end = Math.min(pageOffset + PAGE_SIZE, pageTotal);
     info.textContent = `第 ${start}–${end} 条 / 共 ${pageTotal} 条`;
   }
@@ -536,7 +543,10 @@ $("page-next").addEventListener("click", () => {
 });
 $("save-sessdata").addEventListener("click", saveSessdata);
 $("qr-login").addEventListener("click", qrLogin);
-$("show-all").addEventListener("change", loadVideos);
+$("show-all").addEventListener("change", () => {
+  pageOffset = 0;
+  loadVideos();
+});
 document.querySelectorAll(".export-format").forEach((box) =>
   box.addEventListener("change", updateExportHint));
 updateExportHint();
