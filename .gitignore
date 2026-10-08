@@ -5,3 +5,4 @@ data/
 exports/
 dist/
 __pycache__/
+*.exe
