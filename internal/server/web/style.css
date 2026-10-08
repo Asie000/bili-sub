@@ -171,6 +171,13 @@ th {
   font-weight: 600;
 }
 
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
 td.empty {
   color: var(--muted);
   text-align: center;

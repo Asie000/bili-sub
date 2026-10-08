@@ -61,6 +61,8 @@
       <button id="export">导出</button>
       <button id="refresh">刷新</button>
       <button id="clear">清空</button>
+      <button id="clear-data">清空数据</button>
+      <label class="checkbox"><input type="checkbox" id="force-probe"> 重新探测已完成的</label>
     </div>
     <div class="row" id="export-formats">
       <span class="hint">导出格式（可多选）</span>
@@ -85,6 +87,7 @@
         <tbody id="videos-body"></tbody>
       </table>
     </div>
+    <div class="pager"><button id="page-prev">上一页</button><span id="page-info" class="hint"></span><button id="page-next">下一页</button></div>
   </section>
 
   <section class="panel">

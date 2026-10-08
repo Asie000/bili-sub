@@ -11,6 +11,13 @@ const $ = (id) => document.getElementById(id);
 // source replaces the visible list instead of mixing it with the first.
 const state = { currentSource: "" };
 
+// PAGE_SIZE is the fixed page size the server accepts; pageOffset is the
+// offset of the page currently shown and pageTotal is the server-reported total
+// number of rows matching the active filter.
+const PAGE_SIZE = 100;
+let pageOffset = 0;
+let pageTotal = 0;
+
 const STATE_LABELS = {
   pending: "待处理",
   probed: "已探测",
@@ -122,10 +129,10 @@ function formatTitle(v) {
   return v.Title || v.Bvid || "(无标题)";
 }
 
-function renderTable(videos) {
+function renderTable(items) {
   const tbody = $("videos-body");
   tbody.textContent = "";
-  if (!Array.isArray(videos) || videos.length === 0) {
+  if (!Array.isArray(items) || items.length === 0) {
     const row = tbody.insertRow();
     const cell = row.insertCell();
     cell.colSpan = 7;
@@ -133,7 +140,7 @@ function renderTable(videos) {
     cell.textContent = "暂无视频，请添加视频";
     return;
   }
-  videos.forEach((v, i) => {
+  items.forEach((v, i) => {
     const row = tbody.insertRow();
     row.insertCell().textContent = i + 1;
     row.insertCell().textContent = formatTitle(v);
@@ -149,18 +156,37 @@ function renderTable(videos) {
 
 async function loadVideos() {
   try {
-    let path = "/api/videos";
+    const params = new URLSearchParams();
     const showAll = $("show-all") && $("show-all").checked;
     if (!showAll && state.currentSource) {
-      path += `?source=${encodeURIComponent(state.currentSource)}`;
+      params.set("source", state.currentSource);
     }
-    const videos = await api(path);
-    renderTable(videos);
+    params.set("offset", String(pageOffset));
+    params.set("limit", String(PAGE_SIZE));
+    const data = await api(`/api/videos?${params.toString()}`);
+    renderTable(data.items);
+    pageTotal = data.total;
+    updatePager();
     await loadStats();
   } catch (err) {
     log(`读取视频列表失败：${err.message}`);
     renderTable([]);
   }
+}
+
+// updatePager mirrors pageOffset/pageTotal into the pager under the table and
+// disables an end button when there is nothing further to step to.
+function updatePager() {
+  const info = $("page-info");
+  if (pageTotal === 0) {
+    info.textContent = "共 0 条";
+  } else {
+    const start = pageOffset + 1;
+    const end = Math.min(pageOffset + PAGE_SIZE, pageTotal);
+    info.textContent = `第 ${start}–${end} 条 / 共 ${pageTotal} 条`;
+  }
+  $("page-prev").disabled = pageOffset === 0;
+  $("page-next").disabled = pageOffset + PAGE_SIZE >= pageTotal;
 }
 
 async function loadStats() {
@@ -186,8 +212,13 @@ async function probe() {
   beginProgress("probe");
   log(`开始探测：${url}`);
   try {
-    const summary = await post("/api/probe", { url, kind: $("kind").value });
+    const summary = await post("/api/probe", {
+      url,
+      kind: $("kind").value,
+      force: $("force-probe").checked,
+    });
     state.currentSource = summary.source || "";
+    pageOffset = 0;
     if (summary.probed === 0) {
       log(`探测完成：该来源没有视频（来源 ${summary.kind || "?"} ${summary.source || ""}）。`);
     } else {
@@ -210,6 +241,7 @@ async function download() {
     const summary = await post("/api/download", {
       lang: $("lang").value,
       transcribe: $("transcribe").checked,
+      source: state.currentSource || "",
     });
     log(`获取字幕完成：成功 ${summary.fetched}，失败 ${summary.failed}`);
     await loadVideos();
@@ -236,7 +268,7 @@ async function exportZip() {
   log(`开始导出（${formats.join(",")}）…`);
   beginProgress("export");
   try {
-    const result = await post("/api/export", { formats });
+    const result = await post("/api/export", { formats, source: state.currentSource || "" });
     log(`导出完成：${result.zip}`);
   } catch (err) {
     showFailure();
@@ -370,6 +402,24 @@ function clearTable() {
   log("已清空列表与进度。");
 }
 
+// clearData is the destructive counterpart to clearTable: it asks the server to
+// drop every stored video/transcript, then reloads the now-empty list. It is
+// confirm-gated because the action cannot be undone.
+async function clearData() {
+  if (!confirm("确定清空所有已探测/已下载的数据吗？此操作不可恢复。")) {
+    return;
+  }
+  try {
+    const result = await post("/api/reset", { confirm: true });
+    log(`已清空数据：删除 ${result.deleted} 条记录。`);
+    pageOffset = 0;
+    state.currentSource = "";
+    await loadVideos();
+  } catch (err) {
+    log(`清空数据失败：${err.message}`);
+  }
+}
+
 function formatEvent(ev) {
   const data = ev.data || {};
   switch (ev.type) {
@@ -379,6 +429,8 @@ function formatEvent(ev) {
       return `下载事件：成功 ${data.fetched}，失败 ${data.failed}`;
     case "export":
       return `导出事件：${data.zip}`;
+    case "reset":
+      return `数据已清空：删除 ${data.deleted} 条记录`;
     case "login":
       return data.error ? `扫码登录失败：${data.error}` : "扫码登录成功，已保存 SESSDATA。";
     case "handoff": {
@@ -448,6 +500,10 @@ function connectEvents() {
           loadVideos();
         }
       }
+      if (ev.type === "reset") {
+        // Another page cleared the store; reload whatever this page is showing.
+        loadVideos();
+      }
     } catch (err) {
       log(`事件解析失败：${e.data}`);
     }
@@ -466,6 +522,18 @@ $("download").addEventListener("click", download);
 $("export").addEventListener("click", exportZip);
 $("refresh").addEventListener("click", loadVideos);
 $("clear").addEventListener("click", clearTable);
+$("clear-data").addEventListener("click", clearData);
+$("page-prev").addEventListener("click", () => {
+  pageOffset = Math.max(0, pageOffset - PAGE_SIZE);
+  loadVideos();
+});
+$("page-next").addEventListener("click", () => {
+  if (pageOffset + PAGE_SIZE >= pageTotal) {
+    return;
+  }
+  pageOffset += PAGE_SIZE;
+  loadVideos();
+});
 $("save-sessdata").addEventListener("click", saveSessdata);
 $("qr-login").addEventListener("click", qrLogin);
 $("show-all").addEventListener("change", loadVideos);
