@@ -25,12 +25,12 @@ type ProbeSummary struct {
 	Failed         int `json:"failed"`
 }
 
-// ProbeProgress is one probe-progress tick, streamed as an SSE
-// `probe_progress` event so the page can show 已处理 done/total while a large
-// source is being probed.
-type ProbeProgress struct {
-	Done  int `json:"done"`
-	Total int `json:"total"`
+// Progress is one progress tick for a long-running operation, streamed as an
+// SSE `progress` event.
+type Progress struct {
+	Op    string `json:"op"` // "probe" | "download" | "export"
+	Done  int    `json:"done"`
+	Total int    `json:"total"`
 }
 
 // DownloadSummary is the outcome of one download run, as returned by
@@ -63,9 +63,9 @@ type HandoffResponse struct {
 // panicking. Hub may be nil, in which case the server creates one.
 type Options struct {
 	Store       *store.Store
-	Probe       func(ctx context.Context, url, kind string, onProgress func(ProbeProgress)) (ProbeSummary, error)
-	Download    func(ctx context.Context, lang string, transcribe bool) (DownloadSummary, error)
-	Export      func(ctx context.Context, formats []string) (string, error)
+	Probe       func(ctx context.Context, url, kind string, onProgress func(Progress)) (ProbeSummary, error)
+	Download    func(ctx context.Context, lang string, transcribe bool, onProgress func(Progress)) (DownloadSummary, error)
+	Export      func(ctx context.Context, formats []string, onProgress func(Progress)) (string, error)
 	Login       func(sessdata, cookie string) error
 	LoginStatus func(ctx context.Context) (LoginState, error)
 	QRLogin     func(ctx context.Context) (string, error)
@@ -251,8 +251,8 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	onProgress := func(p ProbeProgress) {
-		s.eventHub().Broadcast(Event{Type: "probe_progress", Data: p})
+	onProgress := func(p Progress) {
+		s.eventHub().Broadcast(Event{Type: "progress", Data: p})
 	}
 	summary, err := s.opts.Probe(r.Context(), req.URL, req.Kind, onProgress)
 	if err != nil {
@@ -284,7 +284,10 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
 		return
 	}
-	summary, err := s.opts.Download(r.Context(), req.Lang, req.Transcribe)
+	onProgress := func(p Progress) {
+		s.eventHub().Broadcast(Event{Type: "progress", Data: p})
+	}
+	summary, err := s.opts.Download(r.Context(), req.Lang, req.Transcribe, onProgress)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -309,7 +312,10 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "formats 不能为空")
 		return
 	}
-	zipPath, err := s.opts.Export(r.Context(), req.Formats)
+	onProgress := func(p Progress) {
+		s.eventHub().Broadcast(Event{Type: "progress", Data: p})
+	}
+	zipPath, err := s.opts.Export(r.Context(), req.Formats, onProgress)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

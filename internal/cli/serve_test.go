@@ -71,10 +71,10 @@ func TestServeSeamsSerializePipelineOperations(t *testing.T) {
 	if _, err := opts.Probe(context.Background(), "not-a-url", "", nil); !errors.Is(err, errOperationBusy) {
 		t.Errorf("Probe error = %v, want errOperationBusy", err)
 	}
-	if _, err := opts.Download(context.Background(), "", false); !errors.Is(err, errOperationBusy) {
+	if _, err := opts.Download(context.Background(), "", false, nil); !errors.Is(err, errOperationBusy) {
 		t.Errorf("Download error = %v, want errOperationBusy", err)
 	}
-	if _, err := opts.Export(context.Background(), []string{"srt"}); !errors.Is(err, errOperationBusy) {
+	if _, err := opts.Export(context.Background(), []string{"srt"}, nil); !errors.Is(err, errOperationBusy) {
 		t.Errorf("Export error = %v, want errOperationBusy", err)
 	}
 }

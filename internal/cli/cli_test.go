@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -466,4 +467,46 @@ func TestExpandPages(t *testing.T) {
 			t.Errorf("State = %q, want %q", got[0].State, store.StatePending)
 		}
 	})
+}
+
+// TestProgressEmitterThrottles pins the shared progress throttle: the first tick
+// is always emitted, ticks inside the interval window are suppressed, and the
+// final (done == total) tick is always emitted so the page can finish its bar.
+func TestProgressEmitterThrottles(t *testing.T) {
+	tests := []struct {
+		name  string
+		total int
+		dones []int
+		want  []int
+	}{
+		{name: "first tick is always emitted", total: 5, dones: []int{0}, want: []int{0}},
+		{name: "ticks inside the interval window are suppressed", total: 5, dones: []int{0, 1, 2}, want: []int{0}},
+		{name: "the final tick is always emitted", total: 5, dones: []int{0, 1, 5}, want: []int{0, 5}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []int
+			tick := newProgressEmitter(tc.total, func(done, total int) {
+				if total != tc.total {
+					t.Errorf("emit total = %d, want %d", total, tc.total)
+				}
+				got = append(got, done)
+			})
+			for _, done := range tc.dones {
+				tick(done)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("emitted dones = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestProgressEmitterNilEmitIsNoop pins that a command run without a progress
+// sink (the CLI path passes nil) can tick without a nil-call panic.
+func TestProgressEmitterNilEmitIsNoop(t *testing.T) {
+	tick := newProgressEmitter(3, nil)
+	tick(0)
+	tick(1)
+	tick(3)
 }

@@ -38,7 +38,7 @@ func newExportCmd() *cobra.Command {
 				return err
 			}
 			defer rt.close()
-			_, err = rt.export(cmd.OutOrStdout(), cmd.ErrOrStderr(), formats)
+			_, err = rt.export(cmd.OutOrStdout(), cmd.ErrOrStderr(), formats, nil)
 			return err
 		},
 	}
@@ -49,7 +49,7 @@ func newExportCmd() *cobra.Command {
 // export packs the fetched/transcribed subtitles and returns the zip path (for
 // the HTTP /api/export response). out receives the summary line, warn the
 // per-video skip notices.
-func (r *runtime) export(out, warn io.Writer, formats []string) (string, error) {
+func (r *runtime) export(out, warn io.Writer, formats []string, onProgress func(done, total int)) (string, error) {
 	st, err := r.store()
 	if err != nil {
 		return "", err
@@ -64,9 +64,20 @@ func (r *runtime) export(out, warn io.Writer, formats []string) (string, error) 
 		}
 		videos = append(videos, list...)
 	}
+	emit := func(done, total int) {
+		if onProgress != nil {
+			onProgress(done, total)
+		}
+	}
 	if len(videos) == 0 {
+		emit(0, 0)
 		return "", errors.New("export: 没有已抓取的字幕，先运行 download")
 	}
+	// total is every row being packaged; a row whose IR is missing or corrupt is
+	// still counted, so the final tick always reports the same total.
+	emit(0, len(videos))
+	tick := newProgressEmitter(len(videos), onProgress)
+	doneCount := 0
 
 	docs := make(map[string]*ir.Document, len(videos))
 	for _, v := range videos {
@@ -75,6 +86,8 @@ func (r *runtime) export(out, warn io.Writer, formats []string) (string, error) 
 		// with the bvid and skip that one video.
 		if errors.Is(err, sql.ErrNoRows) {
 			fmt.Fprintf(warn, "export: 跳过 %s：没有字幕记录\n", v.Bvid)
+			doneCount++
+			tick(doneCount)
 			continue
 		}
 		if err != nil {
@@ -83,6 +96,8 @@ func (r *runtime) export(out, warn io.Writer, formats []string) (string, error) 
 		var doc ir.Document
 		if err := json.Unmarshal([]byte(irJSON), &doc); err != nil {
 			fmt.Fprintf(warn, "export: 跳过 %s：IR 解析失败: %v\n", v.Bvid, err)
+			doneCount++
+			tick(doneCount)
 			continue
 		}
 		// Multi-P videos share a bvid and title, so both the map key and the
@@ -95,7 +110,10 @@ func (r *runtime) export(out, warn io.Writer, formats []string) (string, error) 
 			doc.Title += suffix
 		}
 		docs[key] = &doc
+		doneCount++
+		tick(doneCount)
 	}
+	emit(len(videos), len(videos))
 	if len(docs) == 0 {
 		return "", errors.New("export: 没有可导出的字幕，所有视频都缺少有效 IR")
 	}

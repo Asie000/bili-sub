@@ -12,6 +12,11 @@
   <div id="login-status" class="status">登录状态：未设置 SESSDATA</div>
 </header>
 
+<div id="progress-panel" class="progress-panel" hidden>
+  <span id="progress-label" class="progress-label"></span>
+  <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+</div>
+
 <main>
   <section class="panel login-panel">
     <h2>登录 / Cookie</h2>
@@ -44,7 +49,6 @@
       <button id="probe">探测</button>
       <label class="checkbox"><input type="checkbox" id="show-all"> 显示全部来源</label>
     </div>
-    <div id="probe-progress" class="hint"></div>
     <div class="row">
       <label for="lang">字幕语言</label>
       <select id="lang">

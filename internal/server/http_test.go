@@ -133,7 +133,7 @@ func TestProbeEndpointPassesURLAndKindToSeam(t *testing.T) {
 	const target = "https://www.bilibili.com/video/BV1uv411q7Mv"
 	var gotURL, gotKind string
 	s := newTestServer(t, Options{
-		Probe: func(_ context.Context, url, kind string, _ func(ProbeProgress)) (ProbeSummary, error) {
+		Probe: func(_ context.Context, url, kind string, _ func(Progress)) (ProbeSummary, error) {
 			gotURL, gotKind = url, kind
 			return ProbeSummary{Probed: 1, Downloadable: 1}, nil
 		},
@@ -158,7 +158,7 @@ func TestProbeEndpointPassesURLAndKindToSeam(t *testing.T) {
 
 func TestProbeEndpointRejectsEmptyURL(t *testing.T) {
 	s := newTestServer(t, Options{
-		Probe: func(_ context.Context, _, _ string, _ func(ProbeProgress)) (ProbeSummary, error) {
+		Probe: func(_ context.Context, _, _ string, _ func(Progress)) (ProbeSummary, error) {
 			t.Error("probe seam must not be called for an empty url")
 			return ProbeSummary{}, nil
 		},
@@ -186,7 +186,7 @@ func TestProbeEndpointWithoutSeamReturns501(t *testing.T) {
 // can scope its list to the source it just probed.
 func TestProbeEndpointResponseCarriesSourceAndKind(t *testing.T) {
 	s := newTestServer(t, Options{
-		Probe: func(context.Context, string, string, func(ProbeProgress)) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, func(Progress)) (ProbeSummary, error) {
 			return ProbeSummary{Probed: 2}, nil
 		},
 	})
@@ -217,7 +217,7 @@ func TestProbeEndpointResponseCarriesSourceAndKind(t *testing.T) {
 // though ParseURL alone would reject it.
 func TestProbeEndpointExplicitKindOverridesAutoDetection(t *testing.T) {
 	s := newTestServer(t, Options{
-		Probe: func(context.Context, string, string, func(ProbeProgress)) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, func(Progress)) (ProbeSummary, error) {
 			return ProbeSummary{Probed: 1}, nil
 		},
 	})
@@ -241,7 +241,7 @@ func TestProbeEndpointExplicitKindOverridesAutoDetection(t *testing.T) {
 
 func TestProbeEndpointRejectsUnparseableURL(t *testing.T) {
 	s := newTestServer(t, Options{
-		Probe: func(context.Context, string, string, func(ProbeProgress)) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, func(Progress)) (ProbeSummary, error) {
 			t.Error("probe seam must not be called for an unparseable url")
 			return ProbeSummary{}, nil
 		},
@@ -255,17 +255,17 @@ func TestProbeEndpointRejectsUnparseableURL(t *testing.T) {
 }
 
 // TestProbeEndpointBroadcastsProgress pins that the seam's onProgress ticks are
-// streamed as probe_progress events, including a start (0/N) and the final
-// (N/N) tick the page uses to finish the progress line.
+// streamed as `progress` events tagged with the probe op, including a start
+// (0/N) and the final (N/N) tick the page uses to finish the progress bar.
 func TestProbeEndpointBroadcastsProgress(t *testing.T) {
 	hub := NewHub()
 	events, cancel := hub.Subscribe()
 	defer cancel()
 	s := newTestServer(t, Options{
 		Hub: hub,
-		Probe: func(_ context.Context, _, _ string, onProgress func(ProbeProgress)) (ProbeSummary, error) {
-			onProgress(ProbeProgress{Done: 0, Total: 3})
-			onProgress(ProbeProgress{Done: 3, Total: 3})
+		Probe: func(_ context.Context, _, _ string, onProgress func(Progress)) (ProbeSummary, error) {
+			onProgress(Progress{Op: "probe", Done: 0, Total: 3})
+			onProgress(Progress{Op: "probe", Done: 3, Total: 3})
 			return ProbeSummary{Probed: 3}, nil
 		},
 	})
@@ -276,17 +276,17 @@ func TestProbeEndpointBroadcastsProgress(t *testing.T) {
 	}
 
 	// The handler broadcasts synchronously, so every event is already buffered.
-	var progress []ProbeProgress
+	var progress []Progress
 drain:
 	for {
 		select {
 		case ev := <-events:
-			if ev.Type != "probe_progress" {
+			if ev.Type != "progress" {
 				continue
 			}
-			p, ok := ev.Data.(ProbeProgress)
+			p, ok := ev.Data.(Progress)
 			if !ok {
-				t.Fatalf("probe_progress data has type %T, want ProbeProgress", ev.Data)
+				t.Fatalf("progress data has type %T, want Progress", ev.Data)
 			}
 			progress = append(progress, p)
 		default:
@@ -294,13 +294,62 @@ drain:
 		}
 	}
 	if len(progress) != 2 {
-		t.Fatalf("probe_progress events = %v, want a start and a final tick", progress)
+		t.Fatalf("progress events = %v, want a start and a final tick", progress)
 	}
-	if progress[0] != (ProbeProgress{Done: 0, Total: 3}) {
-		t.Fatalf("first tick = %+v, want the start tick 0/3", progress[0])
+	if progress[0] != (Progress{Op: "probe", Done: 0, Total: 3}) {
+		t.Fatalf("first tick = %+v, want the start tick probe 0/3", progress[0])
 	}
-	if progress[1] != (ProbeProgress{Done: 3, Total: 3}) {
-		t.Fatalf("last tick = %+v, want the final tick 3/3", progress[1])
+	if progress[1] != (Progress{Op: "probe", Done: 3, Total: 3}) {
+		t.Fatalf("last tick = %+v, want the final tick probe 3/3", progress[1])
+	}
+}
+
+// TestDownloadEndpointBroadcastsProgress pins that POST /api/download streams
+// the seam's ticks as `progress` events tagged with the download op, including
+// the start (0/2) and the final (2/2) tick.
+func TestDownloadEndpointBroadcastsProgress(t *testing.T) {
+	hub := NewHub()
+	events, cancel := hub.Subscribe()
+	defer cancel()
+	s := newTestServer(t, Options{
+		Hub: hub,
+		Download: func(_ context.Context, _ string, _ bool, onProgress func(Progress)) (DownloadSummary, error) {
+			onProgress(Progress{Op: "download", Done: 0, Total: 2})
+			onProgress(Progress{Op: "download", Done: 2, Total: 2})
+			return DownloadSummary{Fetched: 2}, nil
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/download", `{}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	var progress []Progress
+drain:
+	for {
+		select {
+		case ev := <-events:
+			if ev.Type != "progress" {
+				continue
+			}
+			p, ok := ev.Data.(Progress)
+			if !ok {
+				t.Fatalf("progress data has type %T, want Progress", ev.Data)
+			}
+			progress = append(progress, p)
+		default:
+			break drain
+		}
+	}
+	if len(progress) != 2 {
+		t.Fatalf("progress events = %v, want a start and a final tick", progress)
+	}
+	if progress[0] != (Progress{Op: "download", Done: 0, Total: 2}) {
+		t.Fatalf("first tick = %+v, want the start tick download 0/2", progress[0])
+	}
+	if progress[1] != (Progress{Op: "download", Done: 2, Total: 2}) {
+		t.Fatalf("last tick = %+v, want the final tick download 2/2", progress[1])
 	}
 }
 
@@ -342,7 +391,7 @@ func TestDownloadEndpointPassesLangAndTranscribe(t *testing.T) {
 	var gotLang string
 	var gotTranscribe bool
 	s := newTestServer(t, Options{
-		Download: func(_ context.Context, lang string, transcribe bool) (DownloadSummary, error) {
+		Download: func(_ context.Context, lang string, transcribe bool, _ func(Progress)) (DownloadSummary, error) {
 			gotLang, gotTranscribe = lang, transcribe
 			return DownloadSummary{Fetched: 2, Failed: 1}, nil
 		},
@@ -361,7 +410,7 @@ func TestDownloadEndpointPassesLangAndTranscribe(t *testing.T) {
 func TestExportEndpointReturnsZip(t *testing.T) {
 	const zipPath = "data/exports/20261008-2.zip"
 	s := newTestServer(t, Options{
-		Export: func(_ context.Context, formats []string) (string, error) {
+		Export: func(_ context.Context, formats []string, _ func(Progress)) (string, error) {
 			if len(formats) != 1 || formats[0] != "srt" {
 				t.Errorf("formats = %v, want [srt]", formats)
 			}
@@ -385,7 +434,7 @@ func TestExportEndpointReturnsZip(t *testing.T) {
 
 func TestExportEndpointRejectsEmptyFormats(t *testing.T) {
 	s := newTestServer(t, Options{
-		Export: func(_ context.Context, _ []string) (string, error) {
+		Export: func(_ context.Context, _ []string, _ func(Progress)) (string, error) {
 			t.Error("export seam must not be called with no formats")
 			return "", nil
 		},
@@ -594,7 +643,7 @@ func TestZeroValueServerEventsDoesNotPanic(t *testing.T) {
 // not panic when a seam result is published.
 func TestServerWithNilHubBroadcastsSafely(t *testing.T) {
 	s := &Server{opts: Options{
-		Probe: func(context.Context, string, string, func(ProbeProgress)) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, func(Progress)) (ProbeSummary, error) {
 			return ProbeSummary{Probed: 1}, nil
 		},
 	}}
@@ -671,7 +720,7 @@ func TestLoginStatusFailureReportsLoggedOutWithoutLeakingTheError(t *testing.T) 
 
 func TestCORSPreflightFromBilibiliIsAllowed(t *testing.T) {
 	s := newTestServer(t, Options{
-		Probe: func(context.Context, string, string, func(ProbeProgress)) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, func(Progress)) (ProbeSummary, error) {
 			return ProbeSummary{}, nil
 		},
 	})
@@ -721,7 +770,7 @@ func TestHandoffEndpointSavesLoginAndReturnsURLWithoutProbing(t *testing.T) {
 		LoginStatus: func(context.Context) (LoginState, error) {
 			return LoginState{LoggedIn: true, Uname: "测试用户"}, nil
 		},
-		Probe: func(context.Context, string, string, func(ProbeProgress)) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, func(Progress)) (ProbeSummary, error) {
 			probed = true
 			return ProbeSummary{}, nil
 		},
@@ -768,7 +817,7 @@ func TestHandoffEndpointReportsLoginErrorWithoutProbing(t *testing.T) {
 	probed := false
 	s := newTestServer(t, Options{
 		Login: func(string, string) error { return errors.New("sessdata 校验失败") },
-		Probe: func(context.Context, string, string, func(ProbeProgress)) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, func(Progress)) (ProbeSummary, error) {
 			probed = true
 			return ProbeSummary{Probed: 2}, nil
 		},
@@ -855,7 +904,7 @@ func TestVideosEndpointUnknownSourceIsEmptyArray(t *testing.T) {
 
 func TestProbeEndpointRejectsUnknownKind(t *testing.T) {
 	s := newTestServer(t, Options{
-		Probe: func(context.Context, string, string, func(ProbeProgress)) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, func(Progress)) (ProbeSummary, error) {
 			t.Fatal("the probe seam must not be called for an unknown kind")
 			return ProbeSummary{}, nil
 		},

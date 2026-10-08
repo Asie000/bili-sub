@@ -77,7 +77,7 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 	return server.Options{
 		Store: st,
 		Hub:   hub,
-		Probe: func(ctx context.Context, rawURL, kind string, onProgress func(server.ProbeProgress)) (server.ProbeSummary, error) {
+		Probe: func(ctx context.Context, rawURL, kind string, onProgress func(server.Progress)) (server.ProbeSummary, error) {
 			if !r.opMu.TryLock() {
 				return server.ProbeSummary{}, errOperationBusy
 			}
@@ -85,7 +85,7 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 			var progress func(done, total int)
 			if onProgress != nil {
 				progress = func(done, total int) {
-					onProgress(server.ProbeProgress{Done: done, Total: total})
+					onProgress(server.Progress{Op: "probe", Done: done, Total: total})
 				}
 			}
 			stats, err := r.probe(ctx, io.Discard, rawURL, kind, progress)
@@ -100,25 +100,37 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 				Failed:         stats.Failed,
 			}, nil
 		},
-		Download: func(ctx context.Context, lang string, transcribe bool) (server.DownloadSummary, error) {
+		Download: func(ctx context.Context, lang string, transcribe bool, onProgress func(server.Progress)) (server.DownloadSummary, error) {
 			if !r.opMu.TryLock() {
 				return server.DownloadSummary{}, errOperationBusy
 			}
 			defer r.opMu.Unlock()
+			var progress func(done, total int)
+			if onProgress != nil {
+				progress = func(done, total int) {
+					onProgress(server.Progress{Op: "download", Done: done, Total: total})
+				}
+			}
 			// The downloader owns the .srt; export renders the other formats
 			// from the stored IR, so only srt is written here.
-			stats, err := r.download(ctx, io.Discard, lang, []string{export.FormatSRT}, transcribe)
+			stats, err := r.download(ctx, io.Discard, lang, []string{export.FormatSRT}, transcribe, progress)
 			if err != nil {
 				return server.DownloadSummary{}, err
 			}
 			return server.DownloadSummary{Fetched: stats.Fetched, Failed: stats.Failed}, nil
 		},
-		Export: func(_ context.Context, formats []string) (string, error) {
+		Export: func(_ context.Context, formats []string, onProgress func(server.Progress)) (string, error) {
 			if !r.opMu.TryLock() {
 				return "", errOperationBusy
 			}
 			defer r.opMu.Unlock()
-			return r.export(io.Discard, io.Discard, formats)
+			var progress func(done, total int)
+			if onProgress != nil {
+				progress = func(done, total int) {
+					onProgress(server.Progress{Op: "export", Done: done, Total: total})
+				}
+			}
+			return r.export(io.Discard, io.Discard, formats, progress)
 		},
 		Login:       r.saveSession,
 		LoginStatus: r.loginStatus,

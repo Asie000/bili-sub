@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 
 	"github.com/spf13/cobra"
 
@@ -49,7 +50,7 @@ func newDownloadCmd() *cobra.Command {
 				return err
 			}
 			defer rt.close()
-			_, err = rt.download(cmd.Context(), cmd.OutOrStdout(), lang, formats, transcribe)
+			_, err = rt.download(cmd.Context(), cmd.OutOrStdout(), lang, formats, transcribe, nil)
 			return err
 		},
 	}
@@ -67,7 +68,7 @@ type downloadStats struct {
 	Failed  int
 }
 
-func (r *runtime) download(ctx context.Context, out io.Writer, lang string, formats []string, transcribe bool) (downloadStats, error) {
+func (r *runtime) download(ctx context.Context, out io.Writer, lang string, formats []string, transcribe bool, onProgress func(done, total int)) (downloadStats, error) {
 	var stats downloadStats
 	st, err := r.store()
 	if err != nil {
@@ -105,12 +106,24 @@ func (r *runtime) download(ctx context.Context, out io.Writer, lang string, form
 		return stats, err
 	}
 	stats.Total = len(videos)
+	// The progress total is known once the downloadable rows are selected; the
+	// start tick fires before the first worker, and the final (total,total) tick
+	// after the last one, so the page shows 0/N then N/N even around failures.
+	emit := func(done, total int) {
+		if onProgress != nil {
+			onProgress(done, total)
+		}
+	}
+	emit(0, stats.Total)
+	tick := newProgressEmitter(stats.Total, onProgress)
+	var doneCount int64
 	en := pipeline.NewEnumerator(client)
 	dir := r.subtitleDir()
 	dl := pipeline.NewDownloader(client, st, en, dir)
 
 	results := pipeline.Run(ctx, videos, r.cfg.Concurrency, func(ctx context.Context, v store.Video) (*ir.Document, error) {
 		doc, err := dl.FetchSubtitle(ctx, v, lang)
+		tick(int(atomic.AddInt64(&doneCount, 1)))
 		if err == nil {
 			return doc, nil
 		}
@@ -139,6 +152,7 @@ func (r *runtime) download(ctx context.Context, out io.Writer, lang string, form
 		okCount++
 		fmt.Fprintf(out, "第 %d 项 %s 已下载（%s）\n", i+1, v.Bvid, res.Value.Lang)
 	}
+	emit(stats.Total, stats.Total)
 	stats.Fetched = okCount
 	stats.Failed = failCount
 	fmt.Fprintf(out, "下载完成：共 %d，成功 %d，失败 %d，输出目录 %s\n", stats.Total, okCount, failCount, dir)

@@ -58,6 +58,38 @@ function log(message) {
   box.scrollTop = box.scrollHeight;
 }
 
+// OP_LABELS names the three long-running operations for the progress panel.
+const OP_LABELS = { probe: "探测", download: "获取字幕", export: "导出" };
+
+// showProgress fills the persistent panel under the header. A tick with total 0
+// (an operation that reports no count) shows 0% and a done/0 label. The panel
+// is never hidden on completion, so progress stays visible.
+function showProgress(op, done, total) {
+  const panel = $("progress-panel");
+  if (!panel) {
+    return;
+  }
+  panel.hidden = false;
+  $("progress-label").textContent = `${OP_LABELS[op] || op} ${done}/${total}`;
+  $("progress-fill").style.width = total > 0 ? `${(done / total) * 100}%` : "0%";
+}
+
+// hideProgress hides the panel; it is used when an operation fails before it
+// can report any progress.
+function hideProgress() {
+  const panel = $("progress-panel");
+  if (panel) {
+    panel.hidden = true;
+  }
+}
+
+// beginProgress shows the bar for a locally started operation before the
+// server's first tick arrives.
+function beginProgress(op) {
+  showProgress(op, 0, 0);
+  $("progress-label").textContent = "准备中…";
+}
+
 function formatPubdate(seconds) {
   if (!seconds || seconds <= 0) {
     return "-";
@@ -139,7 +171,7 @@ async function probe() {
   const label = button.textContent;
   button.disabled = true;
   button.textContent = "探测中…";
-  $("probe-progress").textContent = "";
+  beginProgress("probe");
   log(`开始探测：${url}`);
   try {
     const summary = await post("/api/probe", { url, kind: $("kind").value });
@@ -151,7 +183,7 @@ async function probe() {
     }
     await loadVideos();
   } catch (err) {
-    $("probe-progress").textContent = "";
+    hideProgress();
     log(`探测失败：${err.message}`);
   } finally {
     button.disabled = false;
@@ -161,6 +193,7 @@ async function probe() {
 
 async function download() {
   log("开始获取字幕…");
+  beginProgress("download");
   try {
     const summary = await post("/api/download", {
       lang: $("lang").value,
@@ -169,6 +202,7 @@ async function download() {
     log(`获取字幕完成：成功 ${summary.fetched}，失败 ${summary.failed}`);
     await loadVideos();
   } catch (err) {
+    hideProgress();
     log(`获取字幕失败：${err.message}`);
   }
 }
@@ -188,10 +222,12 @@ async function exportZip() {
     return;
   }
   log(`开始导出（${formats.join(",")}）…`);
+  beginProgress("export");
   try {
     const result = await post("/api/export", { formats });
     log(`导出完成：${result.zip}`);
   } catch (err) {
+    hideProgress();
     log(`导出失败：${err.message}`);
   }
 }
@@ -317,7 +353,7 @@ function clearTable() {
   $("videos-body").textContent = "";
   $("stats").textContent = "";
   state.currentSource = "";
-  $("probe-progress").textContent = "";
+  hideProgress();
   $("log").textContent = "";
   log("已清空列表与进度。");
 }
@@ -357,9 +393,9 @@ function connectEvents() {
   source.onmessage = (e) => {
     try {
       const ev = JSON.parse(e.data);
-      if (ev.type === "probe_progress") {
+      if (ev.type === "progress") {
         const data = ev.data || {};
-        $("probe-progress").textContent = `探测中… 已处理 ${data.done}/${data.total}`;
+        showProgress(data.op, data.done, data.total);
         return;
       }
       log(formatEvent(ev));
@@ -390,11 +426,15 @@ function connectEvents() {
           applyLoginStatus({ logged_in: true, uname: data.uname });
         }
       }
-      if (ev.type === "probe" || ev.type === "download") {
-        if (ev.type === "probe") {
-          $("probe-progress").textContent = "";
+      if (ev.type === "probe" || ev.type === "download" || ev.type === "export") {
+        // The operation is done: fill the bar and keep it visible with a
+        // completion label instead of hiding it.
+        $("progress-label").textContent = `${OP_LABELS[ev.type]}完成`;
+        $("progress-fill").style.width = "100%";
+        $("progress-panel").hidden = false;
+        if (ev.type === "probe" || ev.type === "download") {
+          loadVideos();
         }
-        loadVideos();
       }
     } catch (err) {
       log(`事件解析失败：${e.data}`);
