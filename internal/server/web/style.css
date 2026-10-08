@@ -137,6 +137,24 @@ td.empty {
   color: #9a6700;
 }
 
+.qr-area {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.qr-area img {
+  width: 240px;
+  height: 240px;
+  image-rendering: pixelated;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  padding: 8px;
+}
+
 .log {
   max-height: 16rem;
   overflow-y: auto;

@@ -303,6 +303,12 @@ func TestQRCodeEndpointReturnsURL(t *testing.T) {
 	if got["url"] != qrURL {
 		t.Fatalf("url = %q, want %q", got["url"], qrURL)
 	}
+	if !strings.HasPrefix(got["png"], "data:image/png;base64,") {
+		t.Fatalf("png = %.40q..., want a data:image/png;base64 URL", got["png"])
+	}
+	if len(got["png"]) < 200 {
+		t.Fatalf("png payload too small (%d bytes), QR was probably not rendered", len(got["png"]))
+	}
 }
 
 func TestEventsEndpointStreamsBroadcast(t *testing.T) {

@@ -231,7 +231,14 @@ func (s *Server) handleQRCode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"url": qrURL})
+	// The page shows the code as an image; the reachability of the scan is
+	// reported asynchronously over SSE by the QRLogin seam.
+	png, err := qrDataURL(qrURL)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "生成二维码图片失败: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"url": qrURL, "png": png})
 }
 
 // handleEvents streams Hub events as SSE. It subscribes before flushing the

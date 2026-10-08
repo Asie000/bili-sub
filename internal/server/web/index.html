@@ -18,7 +18,10 @@
     <input id="sessdata" type="password" autocomplete="off" placeholder="粘贴 SESSDATA">
     <button id="save-sessdata">保存 SESSDATA</button>
     <button id="qr-login">扫码登录</button>
-    <div id="qr-area" class="hint" hidden></div>
+    <div id="qr-area" class="qr-area" hidden>
+      <img id="qr-img" alt="登录二维码" width="240" height="240">
+      <div id="qr-status" class="hint"></div>
+    </div>
   </section>
 
   <section class="panel">

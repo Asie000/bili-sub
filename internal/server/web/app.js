@@ -189,13 +189,16 @@ async function saveSessdata() {
 }
 
 async function qrLogin() {
+  const area = $("qr-area");
+  const status = $("qr-status");
   try {
     const result = await api("/api/login/qrcode");
-    const area = $("qr-area");
     area.hidden = false;
-    area.textContent = `请用哔哩哔哩 App 扫描：${result.url}`;
-    log(`二维码已生成：${result.url}`);
+    $("qr-img").src = result.png;
+    status.textContent = "请用哔哩哔哩 App 扫码，并在手机上确认登录";
+    log("二维码已生成，请用哔哩哔哩 App 扫描。");
   } catch (err) {
+    area.hidden = true;
     log(`获取二维码失败：${err.message}`);
   }
 }
@@ -231,8 +234,20 @@ function connectEvents() {
     try {
       const ev = JSON.parse(e.data);
       log(formatEvent(ev));
-      if (ev.type === "login" && ev.data && ev.data.ok) {
-        $("login-status").textContent = "登录状态：已保存 SESSDATA";
+      if (ev.type === "login") {
+        const ok = !!(ev.data && ev.data.ok);
+        const status = $("qr-status");
+        if (ok) {
+          $("login-status").textContent = "登录状态：已保存 SESSDATA";
+          if (status) {
+            status.textContent = "登录成功，已保存 SESSDATA。";
+          }
+        } else if (ev.data && ev.data.error) {
+          $("login-status").textContent = "登录状态：未登录";
+          if (status) {
+            status.textContent = `登录失败：${ev.data.error}`;
+          }
+        }
       }
       if (ev.type === "probe" || ev.type === "download") {
         loadVideos();
