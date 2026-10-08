@@ -7,7 +7,6 @@ type Segment struct {
 	EndMs   int64  `json:"end_ms"`
 	Text    string `json:"text"`
 	Speaker string `json:"speaker,omitempty"`
-	HasTime bool   `json:"-"` // 导出时是否保留时间轴由渲染器决定
 }
 
 type Document struct {
