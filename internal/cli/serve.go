@@ -114,7 +114,7 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 			defer r.opMu.Unlock()
 			return r.export(io.Discard, io.Discard, formats)
 		},
-		Login:       r.saveSessdata,
+		Login:       r.saveSession,
 		LoginStatus: r.loginStatus,
 		QRLogin:     r.qrLogin(hub),
 	}
@@ -136,10 +136,10 @@ func (r *runtime) loginStatus(ctx context.Context) (server.LoginState, error) {
 	return server.LoginState{LoggedIn: ok, Uname: uname}, nil
 }
 
-// saveSessdata persists a SESSDATA and verifies it before reporting success, so
-// a typo is reported instead of silently stored.
-func (r *runtime) saveSessdata(sessdata string) error {
-	if err := bili.SaveSESSDATA(r.sessionPath(), sessdata); err != nil {
+// saveSession persists a SESSDATA and/or a full browser Cookie and verifies it
+// before reporting success, so a typo is reported instead of silently stored.
+func (r *runtime) saveSession(sessdata, cookie string) error {
+	if err := bili.SaveSession(r.sessionPath(), sessdata, cookie); err != nil {
 		return err
 	}
 	client, err := r.client()
@@ -153,7 +153,7 @@ func (r *runtime) saveSessdata(sessdata string) error {
 		return fmt.Errorf("login: 校验失败: %w", err)
 	}
 	if !ok {
-		return fmt.Errorf("login: SESSDATA 已保存，但校验未通过（未登录）")
+		return fmt.Errorf("login: 登录信息已保存，但校验未通过（未登录）")
 	}
 	return nil
 }
@@ -192,7 +192,7 @@ func (r *runtime) qrLogin(hub *server.Hub) func(context.Context) (string, error)
 				done <- qrResult{url: url}
 			})
 			if err == nil {
-				err = bili.SaveSESSDATA(r.sessionPath(), sessdata)
+				err = bili.SaveSession(r.sessionPath(), sessdata, "")
 			}
 			switch {
 			case err == nil:

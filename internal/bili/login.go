@@ -26,20 +26,24 @@ const (
 	defaultPollInterval = 2 * time.Second
 )
 
-// sessionFile is the on-disk shape of the persisted SESSDATA file.
+// sessionFile is the on-disk shape of the persisted session. SESSDATA and the
+// optional full browser Cookie are stored side by side; a full Cookie is sent
+// verbatim instead of the SESSDATA-only header.
 type sessionFile struct {
 	SESSDATA string `json:"sessdata"`
+	Cookie   string `json:"cookie,omitempty"`
 }
 
-// SaveSESSDATA writes sessdata to path as JSON, creating parent directories and
-// restricting the file to owner-only access.
-func SaveSESSDATA(path, sessdata string) error {
+// SaveSession writes sessdata and the optional full browser Cookie to path as
+// JSON, creating parent directories and restricting the file to owner-only
+// access.
+func SaveSession(path, sessdata, cookie string) error {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
 	}
-	b, err := json.Marshal(sessionFile{SESSDATA: sessdata})
+	b, err := json.Marshal(sessionFile{SESSDATA: sessdata, Cookie: cookie})
 	if err != nil {
 		return err
 	}
@@ -50,21 +54,63 @@ func SaveSESSDATA(path, sessdata string) error {
 	return os.Chmod(path, 0o600)
 }
 
-// LoadSESSDATA reads a session file written by SaveSESSDATA. A missing file is
-// not an error: it returns "" and nil.
-func LoadSESSDATA(path string) (string, error) {
+// LoadSession reads a session file written by SaveSession. A missing file is
+// not an error: it returns empty strings and nil.
+func LoadSession(path string) (sessdata, cookie string, err error) {
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
+		return "", "", nil
 	}
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	var s sessionFile
 	if err := json.Unmarshal(b, &s); err != nil {
-		return "", fmt.Errorf("parse %s: %w", path, err)
+		return "", "", fmt.Errorf("parse %s: %w", path, err)
 	}
-	return s.SESSDATA, nil
+	return s.SESSDATA, s.Cookie, nil
+}
+
+// SaveSESSDATA writes only sessdata; it is a thin wrapper over SaveSession so
+// the SESSDATA-only flow is unchanged.
+func SaveSESSDATA(path, sessdata string) error {
+	return SaveSession(path, sessdata, "")
+}
+
+// LoadSESSDATA reads only the SESSDATA field of a session file.
+func LoadSESSDATA(path string) (string, error) {
+	sessdata, _, err := LoadSession(path)
+	return sessdata, err
+}
+
+// ExtractSESSDATA parses the SESSDATA value out of a full Cookie header string.
+// The value is returned exactly as it appears, encoded; bilibili expects the
+// encoded form, so it must not be URL-unescaped. An absent SESSDATA returns "".
+func ExtractSESSDATA(cookie string) string {
+	for _, part := range strings.Split(cookie, ";") {
+		name, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if ok && name == "SESSDATA" {
+			return value
+		}
+	}
+	return ""
+}
+
+// LooksLikeCookie reports whether s is a full browser Cookie header rather than
+// a bare SESSDATA value. It is true when s carries SESSDATA= or more than one
+// ';'-separated key=value pair.
+func LooksLikeCookie(s string) bool {
+	if strings.Contains(s, "SESSDATA=") {
+		return true
+	}
+	pairs := 0
+	for _, part := range strings.Split(s, ";") {
+		name, _, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if ok && name != "" {
+			pairs++
+		}
+	}
+	return pairs > 1
 }
 
 // apiEnvelope is the standard bilibili response shape.

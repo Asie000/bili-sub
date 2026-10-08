@@ -14,6 +14,52 @@ import (
 	"bilibili-sub/internal/store"
 )
 
+// TestRuntimeClientLoadsFullCookieFromSession pins that a session file carrying
+// a full browser Cookie reaches the client, which then sends it verbatim.
+func TestRuntimeClientLoadsFullCookieFromSession(t *testing.T) {
+	rt := newTestRuntime(t)
+	const cookie = "SESSDATA=abc%2Cdef; buvid3=B3VALUE; bili_ticket=XYZ"
+	if err := bili.SaveSession(rt.sessionPath(), "abc%2Cdef", cookie); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	c, err := rt.client()
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	if c.Cookie != cookie {
+		t.Fatalf("client.Cookie = %q, want %q", c.Cookie, cookie)
+	}
+	if c.SESSDATA != "abc%2Cdef" {
+		t.Fatalf("client.SESSDATA = %q, want abc%%2Cdef", c.SESSDATA)
+	}
+}
+
+// TestLoginCommandRejectsConflictingCredentials covers the flag validation,
+// which runs before the runtime is built, so no data directory is created and
+// no network is touched.
+func TestLoginCommandRejectsConflictingCredentials(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"sessdata and cookie", []string{"--sessdata", "a", "--cookie", "SESSDATA=a; buvid3=b"}},
+		{"cookie and qr", []string{"--cookie", "SESSDATA=a; buvid3=b", "--qr"}},
+		{"sessdata and qr", []string{"--sessdata", "a", "--qr"}},
+		{"none", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := newLoginCmd()
+			cmd.SetArgs(tc.args)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			if err := cmd.Execute(); err == nil {
+				t.Fatal("want an error for conflicting or missing login credentials")
+			}
+		})
+	}
+}
+
 func TestRootHasCommands(t *testing.T) {
 	root := NewRootCmd()
 	want := map[string]bool{"login": true, "probe": true, "download": true, "export": true, "status": true, "serve": true}

@@ -48,7 +48,11 @@ func (e *APIError) Unauthorized() bool { return e.Code == -101 || e.Code == -400
 type Client struct {
 	HTTP     *http.Client
 	SESSDATA string
-	Limiter  Limiter
+	// Cookie is a full browser Cookie header string. When it is set, it is sent
+	// verbatim and the anonymous device fingerprint is not fetched, because the
+	// browser cookie already carries buvid3/buvid4.
+	Cookie  string
+	Limiter Limiter
 
 	// FingerprintURL is the device-cookie endpoint; it is a field so tests can
 	// point it at a local server.
@@ -60,6 +64,10 @@ type Client struct {
 	buvid3     string
 	buvid4     string
 }
+
+// retryBackoff is how long the 412 retry waits before its single re-attempt. It
+// is a variable so tests can shorten it.
+var retryBackoff = time.Second
 
 func NewClient(sessdata string, limiter Limiter) *Client {
 	return &Client{
@@ -83,20 +91,29 @@ func (c *Client) Get(ctx context.Context, rawURL string, params map[string]strin
 
 	// bilibili's wbi endpoints (space listing, player) reject requests that
 	// carry no device fingerprint with HTTP 412, so make sure we have one.
-	c.ensureBuvid(ctx, false)
+	c.ensureBuvid(ctx)
 
 	resp, err := c.do(ctx, u.String())
 	if err != nil {
 		return err
 	}
 	if resp.StatusCode == http.StatusPreconditionFailed {
-		// Usually a missing or stale fingerprint; refresh it and retry once.
+		// B站 answers 412 when its risk control rejects the request. Wait out
+		// the short window and retry once with the exact same cookies; a full
+		// browser Cookie usually clears it, while a bare SESSDATA does not.
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
-		c.ensureBuvid(ctx, true)
+		if err := sleepCtx(ctx, retryBackoff); err != nil {
+			return err
+		}
 		resp, err = c.do(ctx, u.String())
 		if err != nil {
 			return err
+		}
+		if resp.StatusCode == http.StatusPreconditionFailed {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			return fmt.Errorf("HTTP 412（B站风控限流）：请稍后再试，或在页面粘贴浏览器完整 Cookie")
 		}
 	}
 	defer resp.Body.Close()
@@ -140,8 +157,24 @@ func (c *Client) do(ctx context.Context, rawURL string) (*http.Response, error) 
 	return c.HTTP.Do(req)
 }
 
-// cookieHeader joins SESSDATA with the anonymous device cookies.
+// sleepCtx waits for d or until ctx is done, whichever comes first.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// cookieHeader returns the Cookie header value. A full browser Cookie is sent
+// verbatim; otherwise SESSDATA is joined with the anonymous device cookies.
 func (c *Client) cookieHeader() string {
+	if c.Cookie != "" {
+		return c.Cookie
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	parts := make([]string, 0, 3)
@@ -157,12 +190,16 @@ func (c *Client) cookieHeader() string {
 	return strings.Join(parts, "; ")
 }
 
-// ensureBuvid fetches buvid3/buvid4 once per client. force re-fetches, which is
-// what the 412 retry uses. Failures are not fatal: the request simply proceeds
-// without a fingerprint, exactly as before.
-func (c *Client) ensureBuvid(ctx context.Context, force bool) {
+// ensureBuvid fetches buvid3/buvid4 once per client. It is a no-op when the
+// client carries a full browser Cookie: that cookie already has the device
+// fingerprint and appending an anonymous one would defeat it. Failures are not
+// fatal: the request simply proceeds without a fingerprint, exactly as before.
+func (c *Client) ensureBuvid(ctx context.Context) {
+	if c.Cookie != "" {
+		return
+	}
 	c.mu.Lock()
-	if c.buvidTried && !force {
+	if c.buvidTried {
 		c.mu.Unlock()
 		return
 	}

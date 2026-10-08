@@ -15,9 +15,10 @@
 <main>
   <section class="panel login-panel">
     <h2>登录 / Cookie</h2>
-    <input id="sessdata" type="password" autocomplete="off" placeholder="粘贴 SESSDATA">
-    <button id="save-sessdata">保存 SESSDATA</button>
+    <input id="sessdata" type="password" autocomplete="off" placeholder="粘贴 SESSDATA 或完整 Cookie">
+    <button id="save-sessdata">保存登录信息</button>
     <button id="qr-login">扫码登录</button>
+    <p class="hint">从 B站页面 F12 → 网络 → 任意请求 → 请求头 Cookie，整段复制（推荐，能避免 412）。</p>
     <div id="qr-area" class="qr-area" hidden>
       <img id="qr-img" alt="登录二维码" width="240" height="240">
       <div id="qr-status" class="hint"></div>

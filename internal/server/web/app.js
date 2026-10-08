@@ -172,19 +172,37 @@ async function exportZip() {
   }
 }
 
+// looksLikeCookie mirrors bili.LooksLikeCookie: a full browser Cookie header
+// carries SESSDATA= or more than one ';'-separated key=value pair. The server
+// derives SESSDATA from it, so the page only has to pick the right field.
+function looksLikeCookie(value) {
+  if (value.includes("SESSDATA=")) {
+    return true;
+  }
+  const pairs = value
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => {
+      const eq = part.indexOf("=");
+      return eq > 0;
+    });
+  return pairs.length > 1;
+}
+
 async function saveSessdata() {
-  const sessdata = $("sessdata").value;
-  if (!sessdata) {
-    log("请先粘贴 SESSDATA。");
+  const value = $("sessdata").value.trim();
+  if (!value) {
+    log("请先粘贴 SESSDATA 或完整 Cookie。");
     return;
   }
+  const body = looksLikeCookie(value) ? { cookie: value } : { sessdata: value };
   try {
-    await post("/api/login/sessdata", { sessdata });
+    await post("/api/login/sessdata", body);
     $("sessdata").value = "";
-    $("login-status").textContent = "登录状态：已保存 SESSDATA";
-    log("SESSDATA 已保存。");
+    $("login-status").textContent = "登录状态：已保存登录信息";
+    log("登录信息已保存。");
   } catch (err) {
-    log(`保存 SESSDATA 失败：${err.message}`);
+    log(`保存登录信息失败：${err.message}`);
   }
 }
 

@@ -244,7 +244,7 @@ func TestSessdataEndpointNeverEchoesTheValue(t *testing.T) {
 	const secret = "s3cr3t-SESSDATA-value"
 	var got string
 	s := newTestServer(t, Options{
-		Login: func(sessdata string) error {
+		Login: func(sessdata, cookie string) error {
 			got = sessdata
 			return nil
 		},
@@ -270,15 +270,38 @@ func TestSessdataEndpointNeverEchoesTheValue(t *testing.T) {
 	}
 }
 
-func TestSessdataEndpointRejectsEmptyValue(t *testing.T) {
+func TestSessdataEndpointPassesFullCookieWithoutEchoing(t *testing.T) {
+	const cookie = "SESSDATA=abc%2Cdef; buvid3=B3; bili_ticket=XYZ"
+	var gotCookie string
 	s := newTestServer(t, Options{
-		Login: func(string) error {
-			t.Error("login seam must not be called for an empty sessdata")
+		Login: func(sessdata, cookie string) error {
+			gotCookie = cookie
 			return nil
 		},
 	})
 
-	rec := serve(t, s, http.MethodPost, "/api/login/sessdata", `{"sessdata":""}`)
+	rec := serve(t, s, http.MethodPost, "/api/login/sessdata", fmt.Sprintf(`{"cookie":%q}`, cookie))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if gotCookie != cookie {
+		t.Fatalf("seam received cookie %q, want the posted value", gotCookie)
+	}
+	if strings.Contains(rec.Body.String(), "bili_ticket") || strings.Contains(rec.Body.String(), "SESSDATA") {
+		t.Fatalf("response %q must not echo the cookie value", rec.Body.String())
+	}
+}
+
+func TestSessdataEndpointRejectsEmptyValue(t *testing.T) {
+	s := newTestServer(t, Options{
+		Login: func(string, string) error {
+			t.Error("login seam must not be called when both values are empty")
+			return nil
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/login/sessdata", `{"sessdata":"","cookie":""}`)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("code = %d, want 400", rec.Code)

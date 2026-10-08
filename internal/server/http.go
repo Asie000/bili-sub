@@ -44,7 +44,7 @@ type Options struct {
 	Probe       func(ctx context.Context, url string) (ProbeSummary, error)
 	Download    func(ctx context.Context, lang string, transcribe bool) (DownloadSummary, error)
 	Export      func(ctx context.Context, formats []string) (string, error)
-	Login       func(sessdata string) error
+	Login       func(sessdata, cookie string) error
 	LoginStatus func(ctx context.Context) (LoginState, error)
 	QRLogin     func(ctx context.Context) (string, error)
 	Hub         *Hub
@@ -246,8 +246,9 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"zip": zipPath})
 }
 
-// handleSessdata persists a pasted SESSDATA. The value is never echoed in the
-// response or logged.
+// handleSessdata persists a pasted SESSDATA and/or a full browser Cookie. At
+// least one must be non-empty. Neither value is echoed in the response or
+// logged.
 func (s *Server) handleSessdata(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Login == nil {
 		writeError(w, http.StatusNotImplemented, "login 未启用")
@@ -255,16 +256,17 @@ func (s *Server) handleSessdata(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		SESSDATA string `json:"sessdata"`
+		Cookie   string `json:"cookie"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
 		return
 	}
-	if req.SESSDATA == "" {
-		writeError(w, http.StatusBadRequest, "sessdata 不能为空")
+	if req.SESSDATA == "" && req.Cookie == "" {
+		writeError(w, http.StatusBadRequest, "sessdata 与 cookie 不能同时为空")
 		return
 	}
-	if err := s.opts.Login(req.SESSDATA); err != nil {
+	if err := s.opts.Login(req.SESSDATA, req.Cookie); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

@@ -24,6 +24,113 @@ func TestSaveLoadSESSDATA(t *testing.T) {
 	}
 }
 
+func TestSaveLoadSessionRoundTripsBothValues(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "session.json")
+	const cookie = "SESSDATA=abc%2Cdef; buvid3=B3VALUE; bili_ticket=XYZ"
+	if err := SaveSession(p, "abc%2Cdef", cookie); err != nil {
+		t.Fatal(err)
+	}
+	sessdata, gotCookie, err := LoadSession(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessdata != "abc%2Cdef" {
+		t.Fatalf("sessdata = %q, want abc%%2Cdef", sessdata)
+	}
+	if gotCookie != cookie {
+		t.Fatalf("cookie = %q, want %q", gotCookie, cookie)
+	}
+}
+
+func TestSaveSessionOmitsEmptyCookie(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "session.json")
+	if err := SaveSession(p, "abc", ""); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != `{"sessdata":"abc"}` {
+		t.Fatalf("file content = %s", b)
+	}
+}
+
+func TestLoadSessionLegacySESSDATAOnlyFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "session.json")
+	if err := os.WriteFile(p, []byte(`{"sessdata":"legacy"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sessdata, cookie, err := LoadSession(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessdata != "legacy" || cookie != "" {
+		t.Fatalf("got sessdata=%q cookie=%q, want legacy and empty", sessdata, cookie)
+	}
+}
+
+func TestLoadSessionMissingFile(t *testing.T) {
+	sessdata, cookie, err := LoadSession(filepath.Join(t.TempDir(), "nope.json"))
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if sessdata != "" || cookie != "" {
+		t.Fatalf("got %q/%q, want empty", sessdata, cookie)
+	}
+}
+
+func TestExtractSESSDATA(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"full browser cookie", "SESSDATA=abc%2Cdef; buvid3=B3VALUE; bili_ticket=XYZ", "abc%2Cdef"},
+		{"spaces around separators", "  buvid3=B3VALUE ; SESSDATA=xyz ; bili_ticket=X", "xyz"},
+		{"bare sessdata value", "abc%2Cdef", ""},
+		{"no sessdata", "buvid3=B3VALUE; bili_ticket=XYZ", ""},
+		{"empty", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ExtractSESSDATA(tc.in); got != tc.want {
+				t.Fatalf("ExtractSESSDATA(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// The encoded SESSDATA must be returned exactly as pasted: bilibili expects the
+// encoded form, so URL-unescaping it would corrupt the session.
+func TestExtractSESSDATAKeepsEncoding(t *testing.T) {
+	got := ExtractSESSDATA("SESSDATA=abc%2Cdef%2Cghi; buvid3=B3")
+	if got != "abc%2Cdef%2Cghi" {
+		t.Fatalf("got %q, want the raw encoded value", got)
+	}
+}
+
+func TestLooksLikeCookie(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"full cookie with sessdata", "SESSDATA=abc; buvid3=B3", true},
+		{"multiple pairs without sessdata", "buvid3=B3; bili_ticket=XYZ", true},
+		{"bare sessdata value", "abc%2Cdef%2Cghi", false},
+		{"single pair", "buvid3=B3", false},
+		{"empty", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := LooksLikeCookie(tc.in); got != tc.want {
+				t.Fatalf("LooksLikeCookie(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSaveSESSDATAWritesJSONAndCreatesParentDir(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "data", "session.json")
 	if err := SaveSESSDATA(p, "abc"); err != nil {

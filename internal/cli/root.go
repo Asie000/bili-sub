@@ -123,19 +123,21 @@ func (r *runtime) rateLimiter() bili.Limiter {
 }
 
 // client builds an API client from the persisted session.json, falling back to
-// the SESSDATA from the config file. The SESSDATA is re-read on every call (the
-// HTTP login endpoint can replace it while the server runs), but the limiter is
-// the runtime's single instance.
+// the SESSDATA from the config file. The SESSDATA and full Cookie are re-read on
+// every call (the HTTP login endpoint can replace them while the server runs),
+// but the limiter is the runtime's single instance.
 func (r *runtime) client() (*bili.Client, error) {
 	sessdata := r.cfg.SESSDATA
-	saved, err := bili.LoadSESSDATA(r.sessionPath())
+	saved, cookie, err := bili.LoadSession(r.sessionPath())
 	if err != nil {
 		return nil, err
 	}
 	if saved != "" {
 		sessdata = saved
 	}
-	return bili.NewClient(sessdata, r.rateLimiter()), nil
+	c := bili.NewClient(sessdata, r.rateLimiter())
+	c.Cookie = cookie
+	return c, nil
 }
 
 // supportedFormats is the set export.Render can produce; --format rejects
