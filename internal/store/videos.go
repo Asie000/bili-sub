@@ -37,12 +37,13 @@ func (s *Store) UpsertVideo(v *Video) (int64, error) {
 
 func (s *Store) ListVideos(state string) ([]Video, error) {
 	q := `SELECT id,bvid,cid,author,title,pubdate,duration,page_index,part,is_charging,state,lang,source_key FROM videos`
+	order := ` ORDER BY id`
 	var rows *sql.Rows
 	var err error
 	if state == "" {
-		rows, err = s.db.Query(q)
+		rows, err = s.db.Query(q + order)
 	} else {
-		rows, err = s.db.Query(q+` WHERE state=?`, state)
+		rows, err = s.db.Query(q+` WHERE state=?`+order, state)
 	}
 	if err != nil {
 		return nil, err
@@ -56,7 +57,15 @@ func (s *Store) ListVideos(state string) ([]Video, error) {
 		}
 		out = append(out, v)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Normalize the zero-row case so callers (e.g. JSON API handlers) get an
+	// empty list instead of a nil slice that marshals to null.
+	if out == nil {
+		out = []Video{}
+	}
+	return out, nil
 }
 
 func (s *Store) SetState(id int64, state, lang string) error {

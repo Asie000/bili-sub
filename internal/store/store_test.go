@@ -3,6 +3,8 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -13,7 +15,7 @@ func TestUpsertIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	v := &Video{Bvid: "BV1xx", Cid: 100, Title: "a", State: StatePending}
+	v := &Video{Bvid: "BV1xx", Cid: 100, Title: "a", IsCharging: true, State: StatePending}
 	id1, err := s.UpsertVideo(v)
 	if err != nil {
 		t.Fatal(err)
@@ -30,6 +32,9 @@ func TestUpsertIdempotent(t *testing.T) {
 	if len(got) != 1 || got[0].Title != "b" {
 		t.Fatalf("bad list: %+v", got)
 	}
+	if !got[0].IsCharging {
+		t.Fatalf("is_charging did not survive round trip: %+v", got[0])
+	}
 }
 
 func TestSetState(t *testing.T) {
@@ -42,6 +47,94 @@ func TestSetState(t *testing.T) {
 	got, _ := s.ListVideos(StateChargingLocked)
 	if len(got) != 1 {
 		t.Fatalf("want 1, got %d", len(got))
+	}
+}
+
+func TestFileConcurrentReadWrite(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	const workers, iterations = 8, 10
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var errs []error
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				v := &Video{Bvid: fmt.Sprintf("BV%d", w), Cid: int64(j + 1), Title: "t", State: StatePending}
+				if _, err := s.UpsertVideo(v); err != nil {
+					mu.Lock()
+					errs = append(errs, err)
+					mu.Unlock()
+					return
+				}
+				if _, err := s.ListVideos(""); err != nil {
+					mu.Lock()
+					errs = append(errs, err)
+					mu.Unlock()
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+	if len(errs) > 0 {
+		t.Fatalf("%d concurrent ops failed, first: %v", len(errs), errs[0])
+	}
+	got, err := s.ListVideos("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != workers*iterations {
+		t.Fatalf("want %d videos, got %d", workers*iterations, len(got))
+	}
+}
+
+func TestListVideosEmptyNonNil(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	got, err := s.ListVideos("nonexistent-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("want non-nil empty slice")
+	}
+	if len(got) != 0 {
+		t.Fatalf("want 0 rows, got %d", len(got))
+	}
+}
+
+func TestListVideosOrderedByID(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for i := 0; i < 5; i++ {
+		if _, err := s.UpsertVideo(&Video{Bvid: fmt.Sprintf("BV%d", i), Cid: 1, State: StatePending}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ListVideos("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("want 5, got %d", len(got))
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i-1].ID > got[i].ID {
+			t.Fatalf("not ordered by id: %+v", got)
+		}
 	}
 }
 

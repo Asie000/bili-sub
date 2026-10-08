@@ -21,7 +21,14 @@ const (
 type Store struct{ db *sql.DB }
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// File-backed databases are shared by concurrent workers and the HTTP
+	// server, so every connection needs a busy timeout; without it the second
+	// concurrent writer fails immediately with SQLITE_BUSY.
+	dsn := path
+	if path != ":memory:" {
+		dsn = "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
