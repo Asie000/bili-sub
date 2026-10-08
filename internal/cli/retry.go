@@ -41,6 +41,6 @@ func (r *runtime) retry(out io.Writer) error {
 			return fmt.Errorf("retry %s: %w", v.Bvid, err)
 		}
 	}
-	fmt.Fprintf(out, "已把 %d 个失败视频重置为 pending，重新运行 probe/download 即可重试。\n", len(videos))
+	fmt.Fprintf(out, "已把 %d 个失败视频重置为 pending，请重新运行 probe <url> 再重试。\n", len(videos))
 	return nil
 }

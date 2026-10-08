@@ -146,6 +146,96 @@ func TestExportWritesZipFromStoredTranscript(t *testing.T) {
 	}
 }
 
+// TestResetRejectsUnsafeDataDir pins the guard: DataDir values that would wipe
+// the working directory or a filesystem root must be refused before
+// os.RemoveAll runs.
+func TestResetRejectsUnsafeDataDir(t *testing.T) {
+	for _, dir := range []string{"..", ".", string(filepath.Separator)} {
+		t.Run(dir, func(t *testing.T) {
+			t.Setenv("BILI_DATA_DIR", dir)
+			err := execute("reset", "--yes")
+			if err == nil {
+				t.Fatalf("reset --yes with BILI_DATA_DIR=%q: error = nil, want a refusal", dir)
+			}
+			if !strings.Contains(err.Error(), "拒绝删除") {
+				t.Fatalf("reset --yes with BILI_DATA_DIR=%q: error = %q, want a refusal", dir, err)
+			}
+		})
+	}
+}
+
+// TestExportSkipsUnreadableTranscripts pins the hardening: a fetched video with
+// no transcript row (sql.ErrNoRows) or a corrupted IR blob must be skipped with
+// a warning, not abort the whole archive.
+func TestExportSkipsUnreadableTranscripts(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BILI_DATA_DIR", dir)
+
+	st, err := store.Open(filepath.Join(dir, "bili_sub.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	validID, err := st.UpsertVideo(&store.Video{Bvid: "BV1valid1111", Cid: 1, Title: "有效视频", State: store.StateFetched, PageIndex: 1})
+	if err != nil {
+		t.Fatalf("upsert valid: %v", err)
+	}
+	doc := ir.Document{
+		Bvid: "BV1valid1111", Cid: 1, Title: "有效视频", Lang: "zh-Hans",
+		Segments: []ir.Segment{{StartMs: 0, EndMs: 1500, Text: "你好"}},
+	}
+	blob, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal IR: %v", err)
+	}
+	if err := st.SaveTranscript(validID, "bilibili", "zh-Hans", string(blob)); err != nil {
+		t.Fatalf("save valid transcript: %v", err)
+	}
+
+	// fetched but no transcripts row at all -> GetTranscript returns sql.ErrNoRows.
+	if _, err := st.UpsertVideo(&store.Video{Bvid: "BV1missing11", Cid: 2, Title: "缺失字幕", State: store.StateFetched, PageIndex: 1}); err != nil {
+		t.Fatalf("upsert missing: %v", err)
+	}
+	// fetched with a row whose ir_json cannot unmarshal.
+	corruptID, err := st.UpsertVideo(&store.Video{Bvid: "BV1corrupt11", Cid: 3, Title: "损坏字幕", State: store.StateFetched, PageIndex: 1})
+	if err != nil {
+		t.Fatalf("upsert corrupt: %v", err)
+	}
+	if err := st.SaveTranscript(corruptID, "bilibili", "zh-Hans", "{not json"); err != nil {
+		t.Fatalf("save corrupt transcript: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	if err := execute("export", "--format", "srt,txt"); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+
+	zips, err := filepath.Glob(filepath.Join(dir, "exports", "*.zip"))
+	if err != nil {
+		t.Fatalf("glob exports: %v", err)
+	}
+	if len(zips) != 1 {
+		t.Fatalf("exported zips = %v, want exactly one", zips)
+	}
+	zr, err := zip.OpenReader(zips[0])
+	if err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	defer zr.Close()
+	if len(zr.File) != 2 {
+		t.Fatalf("zip entries = %d, want 2 (the one valid video in srt+txt)", len(zr.File))
+	}
+	for _, f := range zr.File {
+		if !strings.Contains(f.Name, "BV1valid1111") {
+			t.Errorf("zip entry %q should belong to the valid video", f.Name)
+		}
+		if strings.Contains(f.Name, "BV1missing11") || strings.Contains(f.Name, "BV1corrupt11") {
+			t.Errorf("zip entry %q should have been skipped", f.Name)
+		}
+	}
+}
+
 // TestWriteSubtitleFormats pins the filename agreement with
 // pipeline.Downloader.FetchSubtitle: the downloader owns the .srt, the command
 // writes the other formats beside it, and only multi-P videos get a _P{n}

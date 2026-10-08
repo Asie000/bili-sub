@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,14 +38,14 @@ func newExportCmd() *cobra.Command {
 				return err
 			}
 			defer rt.close()
-			return rt.export(cmd.OutOrStdout(), formats)
+			return rt.export(cmd.OutOrStdout(), cmd.ErrOrStderr(), formats)
 		},
 	}
 	cmd.Flags().String("format", "srt,txt,json,md", "导出格式，逗号分隔：srt,txt,md,json")
 	return cmd
 }
 
-func (r *runtime) export(out io.Writer, formats []string) error {
+func (r *runtime) export(out, warn io.Writer, formats []string) error {
 	st, err := r.store()
 	if err != nil {
 		return err
@@ -66,12 +67,19 @@ func (r *runtime) export(out io.Writer, formats []string) error {
 	docs := make(map[string]*ir.Document, len(videos))
 	for _, v := range videos {
 		_, _, irJSON, err := st.GetTranscript(v.ID)
+		// A locked or half-written row must not abort the whole archive: warn
+		// with the bvid and skip that one video.
+		if errors.Is(err, sql.ErrNoRows) {
+			fmt.Fprintf(warn, "export: 跳过 %s：没有字幕记录\n", v.Bvid)
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("export %s: 读取 IR: %w", v.Bvid, err)
 		}
 		var doc ir.Document
 		if err := json.Unmarshal([]byte(irJSON), &doc); err != nil {
-			return fmt.Errorf("export %s: 解析 IR: %w", v.Bvid, err)
+			fmt.Fprintf(warn, "export: 跳过 %s：IR 解析失败: %v\n", v.Bvid, err)
+			continue
 		}
 		// Multi-P videos share a bvid and title, so both the map key and the
 		// document title need the page suffix; otherwise Pack rejects the
@@ -83,6 +91,9 @@ func (r *runtime) export(out io.Writer, formats []string) error {
 			doc.Title += suffix
 		}
 		docs[key] = &doc
+	}
+	if len(docs) == 0 {
+		return errors.New("export: 没有可导出的字幕，所有视频都缺少有效 IR")
 	}
 
 	outDir := filepath.Join(r.cfg.DataDir, "exports")
