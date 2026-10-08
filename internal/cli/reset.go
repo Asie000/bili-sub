@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -47,22 +48,38 @@ func (r *runtime) reset(out io.Writer) error {
 	return nil
 }
 
-// checkResetPath refuses shapes that would wipe the working directory or a
-// filesystem root (DataDir comes from a hand-edited .env): an empty path, the
-// working directory, its parent, a bare separator, or any filesystem root. A
-// root cleans to itself, so filepath.Dir(p) == p catches `/`, `\` and Windows
-// volume roots such as `C:\`.
+// checkResetPath refuses shapes that would wipe the working directory, a
+// directory above it, or a filesystem root (DataDir comes from a hand-edited
+// .env): an empty path, the working directory, its parent or any ancestor, a
+// bare separator, a filesystem root, or a Windows drive-relative path.
 func checkResetPath(dataDir string) error {
+	refuse := func() error {
+		return fmt.Errorf("reset: 拒绝删除数据目录 %q", dataDir)
+	}
 	p := filepath.Clean(dataDir)
 	// Both separators are listed literally: filepath.Clean normalizes `/` to
 	// `\` on Windows, so the path never needs filepath.Separator here (which
 	// would also collide with the `\\` case at compile time).
 	switch p {
 	case "", ".", "..", "/", `\`:
-		return fmt.Errorf("reset: 拒绝删除数据目录 %q", dataDir)
+		return refuse()
 	}
+	// A root cleans to itself, so filepath.Dir(p) == p catches `/`, `\` and
+	// Windows volume roots such as `C:\`.
 	if filepath.Dir(p) == p {
-		return fmt.Errorf("reset: 拒绝删除数据目录 %q", dataDir)
+		return refuse()
+	}
+	// Multi-level escapes such as `../..` clean to a path whose Dir is still
+	// `..`, so the single `..` case above is not enough: os.RemoveAll would
+	// delete the grandparent of the working directory.
+	if strings.HasPrefix(p, ".."+string(filepath.Separator)) {
+		return refuse()
+	}
+	// A drive-relative Windows value such as `C:` has a volume but no root, so
+	// filepath.Dir does not flag it and os.RemoveAll would resolve it against
+	// the current directory of that drive.
+	if v := filepath.VolumeName(p); v != "" && len(p) == len(v) {
+		return refuse()
 	}
 	return nil
 }

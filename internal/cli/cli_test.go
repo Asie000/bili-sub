@@ -164,6 +164,36 @@ func TestResetRejectsUnsafeDataDir(t *testing.T) {
 	}
 }
 
+// TestCheckResetPathRejectsEscapes pins the hardened guard directly: running a
+// relative escape through `reset --yes` would call os.RemoveAll, so a guard
+// regression must fail here without touching the filesystem. `../..` cleans to
+// a path whose Dir is `..`, which the older filepath.Dir(p)==p check missed.
+func TestCheckResetPathRejectsEscapes(t *testing.T) {
+	unsafe := []string{"..", "../..", "data/../../..", ".", "/"}
+	if filepath.Separator == '\\' { // the package already declares `runtime`
+		// `C:` has a volume name but no root, so filepath.Dir does not flag
+		// it; `C:\` is the volume root case.
+		unsafe = append(unsafe, "C:", `C:\`)
+	}
+	for _, dir := range unsafe {
+		t.Run(dir, func(t *testing.T) {
+			if err := checkResetPath(dir); err == nil {
+				t.Fatalf("checkResetPath(%q) = nil, want a refusal", dir)
+			}
+		})
+	}
+}
+
+// TestCheckResetPathAcceptsRelativeDir keeps the guard from over-rejecting the
+// ordinary data directories the CLI writes to.
+func TestCheckResetPathAcceptsRelativeDir(t *testing.T) {
+	for _, dir := range []string{"data", "data/subtitles", "bili-data"} {
+		if err := checkResetPath(dir); err != nil {
+			t.Errorf("checkResetPath(%q) = %v, want nil", dir, err)
+		}
+	}
+}
+
 // TestExportSkipsUnreadableTranscripts pins the hardening: a fetched video with
 // no transcript row (sql.ErrNoRows) or a corrupted IR blob must be skipped with
 // a warning, not abort the whole archive.
