@@ -301,16 +301,17 @@ func TestProbeIgnoresTracksWithoutURL(t *testing.T) {
 }
 
 // TestProbeUsableTrackAmongDanglingOnes: only tracks with a concrete URL are
-// offered as langs, so the default-priority usable track is reported even when a
-// lower-priority dangling one is present.
+// offered as langs, so when the highest-priority track is dangling (an empty
+// subtitle_url that is not an ai-* one) the lookup falls through to the next
+// usable track instead of reporting no_subtitle.
 func TestProbeUsableTrackAmongDanglingOnes(t *testing.T) {
 	st := newTestStore(t)
 	v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100})
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle":{"subtitles":[
-			{"lan":"en-US","lan_doc":"English","subtitle_url":""},
-			{"lan":"zh-CN","lan_doc":"中文（简体）","subtitle_url":"//aisubtitle.hdslb.com/zh.json"}]}}}`))
+			{"lan":"zh-CN","lan_doc":"中文（简体）","subtitle_url":""},
+			{"lan":"en-US","lan_doc":"English","subtitle_url":"//aisubtitle.hdslb.com/en.json"}]}}}`))
 	}))
 	defer srv.Close()
 
@@ -324,12 +325,12 @@ func TestProbeUsableTrackAmongDanglingOnes(t *testing.T) {
 	if !res.HasSubtitle || !res.CanDownload {
 		t.Fatalf("HasSubtitle=%v CanDownload=%v want true/true", res.HasSubtitle, res.CanDownload)
 	}
-	if len(res.Langs) != 1 || res.Langs[0].Lan != "zh-CN" {
-		t.Fatalf("langs=%+v want only zh-CN", res.Langs)
+	if len(res.Langs) != 1 || res.Langs[0].Lan != "en-US" {
+		t.Fatalf("langs=%+v want only en-US", res.Langs)
 	}
 	got := videoByID(t, st, v.ID)
-	if got.State != store.StateDownloadable || got.Lang != "zh-CN" {
-		t.Fatalf("state=%q lang=%q want %q/zh-CN", got.State, got.Lang, store.StateDownloadable)
+	if got.State != store.StateDownloadable || got.Lang != "en-US" {
+		t.Fatalf("state=%q lang=%q want %q/en-US", got.State, got.Lang, store.StateDownloadable)
 	}
 }
 
@@ -398,6 +399,75 @@ func TestProbeAISubtitleRequiresAid(t *testing.T) {
 	}
 	if got := videoByID(t, st, v.ID); got.State != store.StateNoSubtitle {
 		t.Fatalf("state=%q want %q", got.State, store.StateNoSubtitle)
+	}
+}
+
+// TestProbeAIStatFailureIsNotChargingLocked: a failed AI-stat lookup makes only
+// that candidate unusable. It must not abort with an error (which ProbeVideo
+// would map to charging_locked for a -10403 code) and must not stop the loop
+// from trying a lower-priority usable track.
+func TestProbeAIStatFailureIsNotChargingLocked(t *testing.T) {
+	cases := []struct {
+		name      string
+		aiStatus  int
+		aiBody    string
+		subtitles string
+		wantState string
+		wantLang  string
+		wantDown  bool
+	}{
+		{
+			name:      "api error falls through to usable track",
+			aiStatus:  http.StatusOK,
+			aiBody:    `{"code":-10403,"message":"no permission"}`,
+			subtitles: `{"lan":"ai-zh","lan_doc":"中文（AI）","subtitle_url":""},{"lan":"en-US","lan_doc":"English","subtitle_url":"//aisubtitle.hdslb.com/en.json"}`,
+			wantState: store.StateDownloadable,
+			wantLang:  "en-US",
+			wantDown:  true,
+		},
+		{
+			name:      "no fallback leaves state no_subtitle",
+			aiStatus:  http.StatusInternalServerError,
+			aiBody:    `boom`,
+			subtitles: `{"lan":"ai-zh","lan_doc":"中文（AI）","subtitle_url":""}`,
+			wantState: store.StateNoSubtitle,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			st := newTestStore(t)
+			v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100, Aid: 42, IsCharging: true})
+
+			playerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle":{"subtitles":[` + c.subtitles + `]}}}`))
+			}))
+			defer playerSrv.Close()
+
+			aiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(c.aiStatus)
+				w.Write([]byte(c.aiBody))
+			}))
+			defer aiSrv.Close()
+
+			p := NewProber(bili.NewClient("", nopLimiter{}), st, nil)
+			p.PlayerBaseURL = playerSrv.URL
+			p.AISubtitleURL = aiSrv.URL
+
+			res, err := p.ProbeVideo(context.Background(), v)
+			if err != nil {
+				t.Fatalf("err=%v want nil (AI-stat failure must not abort)", err)
+			}
+			if res.ChargingLocked {
+				t.Fatalf("ChargingLocked=true want false (result=%+v)", res)
+			}
+			if res.CanDownload != c.wantDown || res.HasSubtitle != c.wantDown {
+				t.Fatalf("HasSubtitle=%v CanDownload=%v want %v", res.HasSubtitle, res.CanDownload, c.wantDown)
+			}
+			got := videoByID(t, st, v.ID)
+			if got.State != c.wantState || got.Lang != c.wantLang {
+				t.Fatalf("state=%q lang=%q want %q/%q", got.State, got.Lang, c.wantState, c.wantLang)
+			}
+		})
 	}
 }
 

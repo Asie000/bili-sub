@@ -35,8 +35,8 @@ const (
 )
 
 // Downloader turns one video's subtitle track into an IR document, an .srt file
-// and a transcripts row. PlayerBaseURL/OutputDir/HTTP are exported so tests can
-// point them elsewhere.
+// and a transcripts row. PlayerBaseURL/PlayerV2URL/AISubtitleURL/OutputDir/HTTP
+// are exported so tests can point them elsewhere.
 type Downloader struct {
 	Client        *bili.Client
 	Store         *store.Store

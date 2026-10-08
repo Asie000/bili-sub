@@ -117,9 +117,16 @@ func (p *Prober) markChargingLocked(v store.Video) (*ProbeResult, error) {
 // picks the best track for lang (the default priority order when lang == ""),
 // and resolves its download URL. Tracks with an empty subtitle_url are kept
 // rather than dropped, because AI-only videos expose their subtitle that way;
-// an ai-* track's URL is fetched from the AI subtitle stat endpoint. It returns
-// the chosen track, the usable URL-bearing tracks, and whether one was resolved.
-// Shared by Prober and Downloader so the two cannot drift.
+// an ai-* track's URL is fetched from the AI subtitle stat endpoint.
+//
+// Choice is resolvability-aware without weakening PickLang's preference order:
+// PickLang runs on the remaining candidates, and one that cannot yield a URL (a
+// non-AI entry with an empty subtitle_url, an ai-* entry whose stat lookup fails,
+// or an ai-* entry with no aid to look it up with) is removed from the candidate
+// set before re-picking. So a higher-priority dangling entry does not shadow a
+// lower-priority fetchable one. It returns the chosen track, the usable
+// URL-bearing tracks, and whether one was resolved. Shared by Prober and
+// Downloader so the two cannot drift.
 func resolveSubtitleTrack(ctx context.Context, pr playerRequest, v store.Video, lang string) (bili.SubtitleInfo, []bili.SubtitleInfo, bool, error) {
 	params := map[string]string{
 		"cid": strconv.FormatInt(v.Cid, 10),
@@ -151,19 +158,28 @@ func resolveSubtitleTrack(ctx context.Context, pr playerRequest, v store.Video, 
 		return bili.SubtitleInfo{}, nil, false, err
 	}
 
-	track, ok := PickLang(resp.Subtitle.Subtitles, lang)
-	if !ok {
-		return bili.SubtitleInfo{}, nil, false, nil
-	}
-	if track.SubURL == "" && strings.HasPrefix(track.Lan, "ai-") && v.Aid > 0 {
-		u, err := fetchAISubtitleURL(ctx, pr, v)
-		if err != nil {
-			return bili.SubtitleInfo{}, nil, false, err
+	candidates := resp.Subtitle.Subtitles
+	var track bili.SubtitleInfo
+	for {
+		picked, ok := PickLang(candidates, lang)
+		if !ok {
+			return bili.SubtitleInfo{}, nil, false, nil
 		}
-		track.SubURL = u
-	}
-	if track.SubURL == "" {
-		return bili.SubtitleInfo{}, nil, false, nil
+		if picked.SubURL == "" && strings.HasPrefix(picked.Lan, "ai-") && v.Aid > 0 {
+			// An AI track's URL is not in the player response; the stat
+			// endpoint supplies it. Any failure there (transport, HTTP status,
+			// or API code such as -10403) only makes this candidate unusable: it
+			// is not a charge lock and must not abort the lookup, so the loop
+			// falls through to the next candidate.
+			if u, err := fetchAISubtitleURL(ctx, pr, v); err == nil {
+				picked.SubURL = u
+			}
+		}
+		if picked.SubURL != "" {
+			track = picked
+			break
+		}
+		candidates = withoutLang(candidates, picked.Lan)
 	}
 
 	usable := make([]bili.SubtitleInfo, 0, len(resp.Subtitle.Subtitles))
@@ -176,6 +192,19 @@ func resolveSubtitleTrack(ctx context.Context, pr playerRequest, v store.Video, 
 		}
 	}
 	return track, usable, true, nil
+}
+
+// withoutLang removes every track matching lan (case-insensitively, like
+// PickLang's preference matching) from available, so an unusable candidate
+// cannot be picked again on the next round.
+func withoutLang(available []bili.SubtitleInfo, lan string) []bili.SubtitleInfo {
+	out := make([]bili.SubtitleInfo, 0, len(available))
+	for _, s := range available {
+		if !strings.EqualFold(s.Lan, lan) {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // fetchAISubtitleURL resolves the real subtitle body URL of an AI track from the
