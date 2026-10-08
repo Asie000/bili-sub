@@ -74,6 +74,18 @@ function showProgress(op, done, total) {
   $("progress-fill").style.width = total > 0 ? `${(done / total) * 100}%` : "0%";
 }
 
+// showFailure keeps the panel visible after a failed operation instead of
+// hiding it, so the bar does not silently disappear.
+function showFailure() {
+  const panel = $("progress-panel");
+  if (!panel) {
+    return;
+  }
+  panel.hidden = false;
+  $("progress-label").textContent = "失败";
+  $("progress-fill").style.width = "0%";
+}
+
 // hideProgress hides the panel; it is used when an operation fails before it
 // can report any progress.
 function hideProgress() {
@@ -183,7 +195,7 @@ async function probe() {
     }
     await loadVideos();
   } catch (err) {
-    hideProgress();
+    showFailure();
     log(`探测失败：${err.message}`);
   } finally {
     button.disabled = false;
@@ -202,7 +214,7 @@ async function download() {
     log(`获取字幕完成：成功 ${summary.fetched}，失败 ${summary.failed}`);
     await loadVideos();
   } catch (err) {
-    hideProgress();
+    showFailure();
     log(`获取字幕失败：${err.message}`);
   }
 }
@@ -227,7 +239,7 @@ async function exportZip() {
     const result = await post("/api/export", { formats });
     log(`导出完成：${result.zip}`);
   } catch (err) {
-    hideProgress();
+    showFailure();
     log(`导出失败：${err.message}`);
   }
 }
