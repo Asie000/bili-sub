@@ -37,14 +37,16 @@ type LoginState struct {
 	Uname    string `json:"uname,omitempty"`
 }
 
-// HandoffResponse is what POST /api/handoff returns. Probe is a pointer so an
-// absent probe marshals as null. Neither the posted cookie nor its SESSDATA is
-// ever copied into this type.
+// HandoffResponse is what POST /api/handoff returns. It reports the resulting
+// login state and echoes back the received URL so the page can prefill its
+// input; the extension does not trigger a probe. Neither the posted cookie nor
+// its SESSDATA is ever copied into this type.
 type HandoffResponse struct {
-	OK       bool          `json:"ok"`
-	LoggedIn bool          `json:"logged_in"`
-	Probe    *ProbeSummary `json:"probe"`
-	Error    string        `json:"error"`
+	OK       bool   `json:"ok"`
+	LoggedIn bool   `json:"logged_in"`
+	Uname    string `json:"uname,omitempty"`
+	URL      string `json:"url,omitempty"`
+	Error    string `json:"error"`
 }
 
 // Options wires the server to the store and the long-running operations. Every
@@ -296,6 +298,10 @@ func (s *Server) handleSessdata(w http.ResponseWriter, r *http.Request) {
 // tab URL. A cookie logs in with its SESSDATA derived so both halves persist;
 // a failing Login is reported but does not stop the probe, which runs when a
 // URL is given. The cookie and SESSDATA values are never echoed or logged.
+// handleHandoff receives the browser extension's full Cookie plus the current
+// page URL. It only stores the login and hands the URL back to the page; the
+// user still chooses when to probe. A probe here would re-list every video the
+// local database already holds, which is not what the user asked for.
 func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Cookie string `json:"cookie"`
@@ -310,24 +316,20 @@ func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := HandoffResponse{OK: true}
-	var errs []string
+	resp := HandoffResponse{OK: true, URL: req.URL}
 	if req.Cookie != "" && s.opts.Login != nil {
 		if err := s.opts.Login(bili.ExtractSESSDATA(req.Cookie), req.Cookie); err != nil {
-			errs = append(errs, "登录失败: "+err.Error())
+			resp.Error = "登录失败: " + err.Error()
 		} else {
 			resp.LoggedIn = true
+			if s.opts.LoginStatus != nil {
+				if state, err := s.opts.LoginStatus(r.Context()); err == nil {
+					resp.LoggedIn = state.LoggedIn
+					resp.Uname = state.Uname
+				}
+			}
 		}
 	}
-	if req.URL != "" && s.opts.Probe != nil {
-		summary, err := s.opts.Probe(r.Context(), req.URL)
-		if err != nil {
-			errs = append(errs, "探测失败: "+err.Error())
-		} else {
-			resp.Probe = &summary
-		}
-	}
-	resp.Error = strings.Join(errs, "; ")
 	s.eventHub().Broadcast(Event{Type: "handoff", Data: resp})
 	writeJSON(w, http.StatusOK, resp)
 }

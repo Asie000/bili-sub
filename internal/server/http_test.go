@@ -546,22 +546,25 @@ func TestCORSRejectsForeignOrigin(t *testing.T) {
 // the posted cookie reaches Login with its SESSDATA derived, the posted URL
 // reaches Probe, the probe summary is returned, and no cookie value leaks into
 // the response body.
-func TestHandoffEndpointLogsInProbesAndHidesTheCookie(t *testing.T) {
+func TestHandoffEndpointSavesLoginAndReturnsURLWithoutProbing(t *testing.T) {
 	const cookie = "SESSDATA=abc%2Cdef; buvid3=B3; bili_ticket=XYZ"
 	const target = "https://www.bilibili.com/video/BV1uv411q7Mv"
 
-	var gotSessdata, gotCookie, gotURL string
-	calls := 0
+	var gotSessdata, gotCookie string
+	loginCalls := 0
+	probed := false
 	s := newTestServer(t, Options{
 		Login: func(sessdata, c string) error {
-			calls++
+			loginCalls++
 			gotSessdata, gotCookie = sessdata, c
 			return nil
 		},
-		Probe: func(_ context.Context, url string) (ProbeSummary, error) {
-			calls++
-			gotURL = url
-			return ProbeSummary{Probed: 1, Downloadable: 1}, nil
+		LoginStatus: func(context.Context) (LoginState, error) {
+			return LoginState{LoggedIn: true, Uname: "测试用户"}, nil
+		},
+		Probe: func(context.Context, string) (ProbeSummary, error) {
+			probed = true
+			return ProbeSummary{}, nil
 		},
 	})
 
@@ -571,8 +574,11 @@ func TestHandoffEndpointLogsInProbesAndHidesTheCookie(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
-	if calls != 2 {
-		t.Fatalf("seams called %d times, want Login and Probe once each", calls)
+	if loginCalls != 1 {
+		t.Fatalf("Login called %d times, want 1", loginCalls)
+	}
+	if probed {
+		t.Fatal("the extension handoff must NOT trigger a probe")
 	}
 	if gotCookie != cookie {
 		t.Fatalf("Login received cookie %q, want the posted full cookie", gotCookie)
@@ -580,29 +586,26 @@ func TestHandoffEndpointLogsInProbesAndHidesTheCookie(t *testing.T) {
 	if gotSessdata != "abc%2Cdef" {
 		t.Fatalf("Login received sessdata %q, want the value derived from the cookie", gotSessdata)
 	}
-	if gotURL != target {
-		t.Fatalf("Probe received %q, want %q", gotURL, target)
-	}
 	var got HandoffResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode %q: %v", rec.Body.String(), err)
 	}
-	if !got.OK || !got.LoggedIn {
-		t.Fatalf("response = %+v, want ok and logged_in", got)
+	if !got.OK || !got.LoggedIn || got.Uname != "测试用户" {
+		t.Fatalf("response = %+v, want ok/logged_in/测试用户", got)
 	}
-	if got.Probe == nil || got.Probe.Downloadable != 1 {
-		t.Fatalf("probe = %+v, want the seam summary", got.Probe)
+	if got.URL != target {
+		t.Fatalf("url = %q, want %q echoed back for the input box", got.URL, target)
 	}
-	for _, secret := range []string{cookie, "SESSDATA", "bili_ticket"} {
+	for _, secret := range []string{"abc%2Cdef", "SESSDATA", "bili_ticket"} {
 		if strings.Contains(rec.Body.String(), secret) {
 			t.Fatalf("response %q leaks %q", rec.Body.String(), secret)
 		}
 	}
 }
 
-// TestHandoffEndpointReportsLoginErrorButStillProbes pins the "still attempt the
-// probe" rule: a failing Login is reported in error, but Probe still runs.
-func TestHandoffEndpointReportsLoginErrorButStillProbes(t *testing.T) {
+// TestHandoffEndpointReportsLoginErrorWithoutProbing pins that a failing Login is
+// reported but still does not trigger a probe: the extension only sends.
+func TestHandoffEndpointReportsLoginErrorWithoutProbing(t *testing.T) {
 	probed := false
 	s := newTestServer(t, Options{
 		Login: func(string, string) error { return errors.New("sessdata 校验失败") },
@@ -618,21 +621,18 @@ func TestHandoffEndpointReportsLoginErrorButStillProbes(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
-	if !probed {
-		t.Fatal("Probe must still run after a Login error")
+	if probed {
+		t.Fatal("a failed login must not trigger a probe either")
 	}
 	var got HandoffResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode %q: %v", rec.Body.String(), err)
 	}
 	if got.LoggedIn {
-		t.Fatalf("response = %+v, want logged_in=false after a Login error", got)
+		t.Fatalf("response = %+v, want logged_in=false", got)
 	}
 	if !strings.Contains(got.Error, "校验失败") {
 		t.Fatalf("error = %q, want the Login error reported", got.Error)
-	}
-	if got.Probe == nil || got.Probe.Probed != 2 {
-		t.Fatalf("probe = %+v, want the seam summary", got.Probe)
 	}
 }
 

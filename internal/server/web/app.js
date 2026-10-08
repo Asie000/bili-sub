@@ -303,15 +303,16 @@ function formatEvent(ev) {
     case "login":
       return data.error ? `扫码登录失败：${data.error}` : "扫码登录成功，已保存 SESSDATA。";
     case "handoff": {
-      const probe = data.probe || {};
-      const parts = [`浏览器插件已发送链接：共 ${probe.probed || 0}，可下载 ${probe.downloadable || 0}，无字幕 ${probe.no_subtitle || 0}`];
-      if (!data.logged_in) {
-        parts.push(data.error ? `登录失败：${data.error}` : "未登录");
+      const parts = [];
+      if (data.url) {
+        parts.push("已填入插件发来的链接，请点「探测」");
       }
-      if (data.error && data.logged_in) {
-        parts.push(`提示：${data.error}`);
+      if (data.logged_in) {
+        parts.push(`登录成功${data.uname ? `（${data.uname}）` : ""}`);
+      } else if (data.error) {
+        parts.push(`登录失败：${data.error}`);
       }
-      return parts.join("，");
+      return parts.length ? `浏览器插件：${parts.join("，")}` : "浏览器插件：已收到";
     }
     default:
       return `事件 ${ev.type}：${JSON.stringify(data)}`;
@@ -344,7 +345,16 @@ function connectEvents() {
           log(`扫码登录失败：${ev.data.error}`);
         }
       }
-      if (ev.type === "probe" || ev.type === "download" || ev.type === "handoff") {
+      if (ev.type === "handoff") {
+        const data = ev.data || {};
+        if (data.url) {
+          $("url").value = data.url;
+        }
+        if (data.logged_in) {
+          applyLoginStatus({ logged_in: true, uname: data.uname });
+        }
+      }
+      if (ev.type === "probe" || ev.type === "download") {
         loadVideos();
       }
     } catch (err) {

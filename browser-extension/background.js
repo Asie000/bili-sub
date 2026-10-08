@@ -127,9 +127,9 @@ async function handoff() {
       notes.push("当前页不是 B 站页面");
     }
     if (!data.logged_in) {
-      notes.push("未登录");
+      notes.push(data.error ? "登录未通过：" + data.error : "未登录");
     }
-    const title = `bili-sub：已发送（${summarizeProbe(data.probe)}${notes.length ? "；" + notes.join("；") : ""}）`;
+    const title = `bili-sub：已发送 Cookie 和链接，请在工具页点「探测」${notes.length ? "（" + notes.join("；") + "）" : ""}`;
     await setBadge("OK", "#2e7d32", title);
     const result = { ok: true, title, probe: data.probe || null, error: data.error || "" };
     await saveLastResult(result);
