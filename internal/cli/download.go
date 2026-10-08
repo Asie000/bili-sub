@@ -10,16 +10,22 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"bilibili-sub/internal/asr"
 	"bilibili-sub/internal/export"
 	"bilibili-sub/internal/ir"
 	"bilibili-sub/internal/pipeline"
 	"bilibili-sub/internal/store"
 )
 
+// transcribeWorkerScript is the faster-whisper worker the CLI asks Python to
+// run. It is resolved relative to the working directory, where `go run` and the
+// built binary are expected to be started from.
+const transcribeWorkerScript = "scripts/transcribe_worker.py"
+
 func newDownloadCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "download",
-		Short: "下载可下字幕（--transcribe 待 Task 15）",
+		Short: "下载可下字幕（--transcribe 接入本地 ASR）",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			lang, err := cmd.Flags().GetString("lang")
@@ -48,18 +54,34 @@ func newDownloadCmd() *cobra.Command {
 	}
 	cmd.Flags().String("lang", "", "字幕语言（如 zh、en），空则自动选择")
 	cmd.Flags().String("format", "srt", "落盘格式，逗号分隔：srt,txt,md,json")
-	cmd.Flags().Bool("transcribe", false, "为无字幕视频启用本地 ASR（Task 15 前不可用）")
+	cmd.Flags().Bool("transcribe", false, "为无字幕视频启用本地 ASR（v1 尚无音频源，会如实提示跳过）")
 	return cmd
 }
 
 func (r *runtime) download(ctx context.Context, out io.Writer, lang string, formats []string, transcribe bool) error {
-	if transcribe {
-		fmt.Fprintln(out, "注意：本地 ASR（--transcribe）尚未接入（Task 15），本次只下载已有字幕。")
-	}
 	st, err := r.store()
 	if err != nil {
 		return err
 	}
+
+	if transcribe {
+		// Task 15 wires the pluggable ASR seam but deliberately stops short of
+		// fetching play audio. Without an audio source there is nothing to
+		// transcribe, so --transcribe says so instead of pretending to work.
+		backend := asr.NewFasterWhisper(r.cfg.PythonPath, transcribeWorkerScript, "")
+		defer backend.Close()
+		fmt.Fprintf(out, "本地 ASR 后端：%s（Python=%s，脚本=%s）。\n",
+			backend.Name(), r.cfg.PythonPath, transcribeWorkerScript)
+		noSubtitle, err := st.ListVideos(store.StateNoSubtitle)
+		if err != nil {
+			return err
+		}
+		if len(noSubtitle) > 0 {
+			fmt.Fprintf(out, "注意：%d 个无字幕视频需要本地转写，但 v1 尚未下载播放音频（缺少音频源），本次跳过、不转写。\n",
+				len(noSubtitle))
+		}
+	}
+
 	videos, err := st.ListVideos(store.StateDownloadable)
 	if err != nil {
 		return err
@@ -135,10 +157,10 @@ func writeSubtitleFormats(dir string, v store.Video, doc *ir.Document, formats [
 func newTranscribeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "transcribe",
-		Short: "对无字幕视频转写（Task 15 前不可用）",
+		Short: "对无字幕视频转写（v1 尚无音频源）",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintln(cmd.OutOrStdout(), "transcribe: 本地 ASR 尚未接入（Task 15），暂不可用。")
+			fmt.Fprintln(cmd.OutOrStdout(), "transcribe: 本地 ASR 后端已接入，但 v1 尚未下载播放音频，暂无法转写无字幕视频。")
 			return nil
 		},
 	}

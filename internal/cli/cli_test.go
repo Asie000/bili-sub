@@ -266,6 +266,44 @@ func TestExportSkipsUnreadableTranscripts(t *testing.T) {
 	}
 }
 
+// TestDownloadTranscribeReportsMissingAudioSource pins the Task 15 wiring:
+// `download --transcribe` builds the faster-whisper backend but, because v1
+// fetches no play audio, it reports the limitation for no-subtitle videos
+// instead of pretending to transcribe. Nothing is spawned (the backend starts
+// lazily), so the command stays non-fatal.
+func TestDownloadTranscribeReportsMissingAudioSource(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BILI_DATA_DIR", dir)
+
+	st, err := store.Open(filepath.Join(dir, "bili_sub.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, err := st.UpsertVideo(&store.Video{Bvid: "BV1nosubtitle", Cid: 1, Title: "无字幕", State: store.StateNoSubtitle}); err != nil {
+		t.Fatalf("upsert no-subtitle video: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	root := NewRootCmd()
+	var out strings.Builder
+	root.SetOut(&out)
+	root.SetErr(io.Discard)
+	root.SetArgs([]string{"download", "--transcribe"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("download --transcribe: %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "faster-whisper") {
+		t.Errorf("output = %q, want the ASR backend name", got)
+	}
+	if !strings.Contains(got, "音频源") {
+		t.Errorf("output = %q, want an honest note about the missing audio source", got)
+	}
+}
+
 // TestWriteSubtitleFormats pins the filename agreement with
 // pipeline.Downloader.FetchSubtitle: the downloader owns the .srt, the command
 // writes the other formats beside it, and only multi-P videos get a _P{n}
