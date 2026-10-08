@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,6 +31,7 @@ func Default() *Config {
 }
 
 // Load 读取 .env 风格文件（KEY=VALUE），缺失则用默认值。
+// 数值无法解析时返回错误，不静默回退到默认值。
 func Load(envPath string) (*Config, error) {
 	c := Default()
 	if envPath == "" {
@@ -38,7 +40,9 @@ func Load(envPath string) (*Config, error) {
 	b, err := os.ReadFile(envPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			c.applyEnv()
+			if err := c.applyEnv(); err != nil {
+				return nil, err
+			}
 			return c, nil
 		}
 		return nil, err
@@ -49,21 +53,29 @@ func Load(envPath string) (*Config, error) {
 			continue
 		}
 		kv := strings.SplitN(line, "=", 2)
-		c.set(strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1]))
+		key := strings.TrimSpace(kv[0])
+		if err := c.set(key, strings.TrimSpace(kv[1])); err != nil {
+			return nil, fmt.Errorf("config %s: %w", key, err)
+		}
 	}
-	c.applyEnv()
+	if err := c.applyEnv(); err != nil {
+		return nil, err
+	}
 	return c, nil
 }
 
-func (c *Config) applyEnv() {
+func (c *Config) applyEnv() error {
 	for _, k := range []string{"SESSDATA", "BILI_CONCURRENCY", "BILI_QPS", "FFMPEG_PATH", "PYTHON_PATH", "BILI_DATA_DIR"} {
 		if v := os.Getenv(k); v != "" {
-			c.set(k, v)
+			if err := c.set(k, v); err != nil {
+				return fmt.Errorf("config %s: %w", k, err)
+			}
 		}
 	}
+	return nil
 }
 
-func (c *Config) set(k, v string) {
+func (c *Config) set(k, v string) error {
 	switch k {
 	case "SESSDATA":
 		c.SESSDATA = v
@@ -71,16 +83,21 @@ func (c *Config) set(k, v string) {
 		c.DataDir = v
 		c.DBPath = filepath.Join(v, "bili_sub.db")
 	case "BILI_CONCURRENCY":
-		if n, err := strconv.Atoi(v); err == nil {
-			c.Concurrency = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return err
 		}
+		c.Concurrency = n
 	case "BILI_QPS":
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			c.QPS = f
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return err
 		}
+		c.QPS = f
 	case "FFMPEG_PATH":
 		c.FFmpegPath = v
 	case "PYTHON_PATH":
 		c.PythonPath = v
 	}
+	return nil
 }
