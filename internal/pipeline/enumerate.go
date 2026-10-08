@@ -5,6 +5,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 
 	"bilibili-sub/internal/bili"
 )
@@ -30,6 +31,9 @@ type Enumerator struct {
 	NavURL       string
 
 	signer *bili.WBISigner
+	// mu guards signer: probes are dispatched concurrently, so the lazy build
+	// must not race on the field or fetch the nav keys twice.
+	mu sync.Mutex
 }
 
 func NewEnumerator(c *bili.Client) *Enumerator {
@@ -55,7 +59,7 @@ func (e *Enumerator) ResolveVideo(ctx context.Context, bvid string) (*bili.Video
 // video count is covered or a page comes back empty. Space requests are
 // WBI-signed.
 func (e *Enumerator) EnumerateSpace(ctx context.Context, mid string) ([]*bili.VideoInfo, error) {
-	signer, err := e.wbiSigner(ctx)
+	signer, err := e.Signer(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -138,9 +142,11 @@ func (e *Enumerator) EnumerateFav(ctx context.Context, mediaID string) ([]*bili.
 	return videos, nil
 }
 
-// wbiSigner lazily fetches the WBI keys from nav and caches the signer, so the
-// keys are only fetched once per Enumerator.
-func (e *Enumerator) wbiSigner(ctx context.Context) (*bili.WBISigner, error) {
+// Signer returns the lazily-built WBI signer, fetching the keys from nav at
+// most once per Enumerator. It is safe for concurrent use.
+func (e *Enumerator) Signer(ctx context.Context) (*bili.WBISigner, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.signer != nil {
 		return e.signer, nil
 	}

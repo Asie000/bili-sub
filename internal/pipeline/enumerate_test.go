@@ -295,3 +295,45 @@ func TestEnumerateSpaceCachesSigner(t *testing.T) {
 		t.Fatalf("navHits=%d want 1", navHits)
 	}
 }
+
+// TestSignerConcurrent exercises the lazily-built signer from several
+// goroutines: run with -race it catches the unlocked double-build/racing field
+// write that concurrent probes can trigger.
+func TestSignerConcurrent(t *testing.T) {
+	var mu sync.Mutex
+	navHits := 0
+	navSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		navHits++
+		mu.Unlock()
+		fmt.Fprintf(w, `{"code":0,"message":"0","data":{"wbi_img":{"img_url":%q,"sub_url":%q}}}`,
+			"https://i0.hdslb.com/bfs/wbi/"+testImgKey+".png",
+			"https://i0.hdslb.com/bfs/wbi/"+testSubKey+".png")
+	}))
+	defer navSrv.Close()
+
+	e := NewEnumerator(bili.NewClient("", nopLimiter{}))
+	e.NavURL = navSrv.URL
+
+	const workers = 8
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := e.Signer(context.Background()); err != nil {
+				t.Errorf("Signer: %v", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if navHits != 1 {
+		t.Fatalf("navHits=%d want 1", navHits)
+	}
+}
