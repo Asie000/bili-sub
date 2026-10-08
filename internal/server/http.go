@@ -240,6 +240,9 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 	if explicit, ok := pipeline.ParseSourceKind(req.Kind); ok {
 		kind = explicit
 		source, parseErr = pipeline.ParseURLForKind(req.URL, kind)
+	} else if req.Kind != "" {
+		writeError(w, http.StatusBadRequest, "未知的来源类型: "+req.Kind)
+		return
 	} else {
 		kind, source, parseErr = pipeline.ParseURL(req.URL)
 	}

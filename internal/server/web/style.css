@@ -3,6 +3,15 @@
   --border: #d0d7de;
   --muted: #6a737d;
   --accent: #00a1d6;
+  --bg: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1b1b1f;
+    --border: #3a3a40;
+    --muted: #9aa0a6;
+  }
 }
 
 * {
@@ -113,7 +122,7 @@ table {
 .table-wrap thead th {
   position: sticky;
   top: 0;
-  background: var(--bg, #fff);
+  background: var(--bg, Canvas);
   z-index: 1;
 }
 

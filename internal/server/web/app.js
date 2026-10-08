@@ -151,6 +151,7 @@ async function probe() {
     }
     await loadVideos();
   } catch (err) {
+    $("probe-progress").textContent = "";
     log(`探测失败：${err.message}`);
   } finally {
     button.disabled = false;

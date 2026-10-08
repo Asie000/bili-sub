@@ -837,3 +837,34 @@ func TestHandoffCORSRejectsForeignOrigin(t *testing.T) {
 		t.Fatalf("foreign origin was granted CORS: %q", got)
 	}
 }
+
+func TestVideosEndpointUnknownSourceIsEmptyArray(t *testing.T) {
+	st := openStore(t)
+	seedVideo(t, st, "BV1uv411q7Mv", store.StatePending)
+	s := newTestServer(t, Options{Store: st})
+
+	rec := serve(t, s, http.MethodGet, "/api/videos?source=nope", "")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rec.Code)
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
+		t.Fatalf("body = %q, want []", got)
+	}
+}
+
+func TestProbeEndpointRejectsUnknownKind(t *testing.T) {
+	s := newTestServer(t, Options{
+		Probe: func(context.Context, string, string, func(ProbeProgress)) (ProbeSummary, error) {
+			t.Fatal("the probe seam must not be called for an unknown kind")
+			return ProbeSummary{}, nil
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/probe",
+		`{"url":"https://www.bilibili.com/video/BV1uv411q7Mv","kind":"video"}`)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+}
