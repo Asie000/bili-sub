@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"bilibili-sub/internal/bili"
 	"bilibili-sub/internal/store"
 )
 
@@ -34,6 +35,16 @@ type DownloadSummary struct {
 type LoginState struct {
 	LoggedIn bool   `json:"logged_in"`
 	Uname    string `json:"uname,omitempty"`
+}
+
+// HandoffResponse is what POST /api/handoff returns. Probe is a pointer so an
+// absent probe marshals as null. Neither the posted cookie nor its SESSDATA is
+// ever copied into this type.
+type HandoffResponse struct {
+	OK       bool          `json:"ok"`
+	LoggedIn bool          `json:"logged_in"`
+	Probe    *ProbeSummary `json:"probe"`
+	Error    string        `json:"error"`
 }
 
 // Options wires the server to the store and the long-running operations. Every
@@ -90,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/download", s.handleDownload)
 	mux.HandleFunc("POST /api/export", s.handleExport)
 	mux.HandleFunc("POST /api/login/sessdata", s.handleSessdata)
+	mux.HandleFunc("POST /api/handoff", s.handleHandoff)
 	mux.HandleFunc("GET /api/login/status", s.handleLoginStatus)
 	mux.HandleFunc("GET /api/login/qrcode", s.handleQRCode)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
@@ -98,8 +110,9 @@ func (s *Server) Handler() http.Handler {
 
 // allowedCORSOrigin reports whether an Origin may call this API from a browser
 // page. The bookmarklet runs inside a bilibili page, so bilibili hosts (plus
-// localhost) are allowed. A wildcard would let any website drive this local
-// tool, so it is deliberately not used.
+// localhost) are allowed; the Firefox/Chrome extension origins are allowed too
+// so the extension can post directly. A wildcard would let any website drive
+// this local tool, so it is deliberately not used.
 func allowedCORSOrigin(origin string) bool {
 	if origin == "" {
 		return false
@@ -107,6 +120,12 @@ func allowedCORSOrigin(origin string) bool {
 	u, err := url.Parse(origin)
 	if err != nil {
 		return false
+	}
+	// The browser extension posts from its own origin, which browsers do not
+	// route through a host permission; allow both extension schemes.
+	switch u.Scheme {
+	case "moz-extension", "chrome-extension":
+		return u.Host != ""
 	}
 	host := u.Hostname()
 	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
@@ -271,6 +290,46 @@ func (s *Server) handleSessdata(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// handleHandoff receives the browser extension's full Cookie plus the current
+// tab URL. A cookie logs in with its SESSDATA derived so both halves persist;
+// a failing Login is reported but does not stop the probe, which runs when a
+// URL is given. The cookie and SESSDATA values are never echoed or logged.
+func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Cookie string `json:"cookie"`
+		URL    string `json:"url"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
+		return
+	}
+	if req.Cookie == "" && req.URL == "" {
+		writeError(w, http.StatusBadRequest, "cookie 与 url 不能同时为空")
+		return
+	}
+
+	resp := HandoffResponse{OK: true}
+	var errs []string
+	if req.Cookie != "" && s.opts.Login != nil {
+		if err := s.opts.Login(bili.ExtractSESSDATA(req.Cookie), req.Cookie); err != nil {
+			errs = append(errs, "登录失败: "+err.Error())
+		} else {
+			resp.LoggedIn = true
+		}
+	}
+	if req.URL != "" && s.opts.Probe != nil {
+		summary, err := s.opts.Probe(r.Context(), req.URL)
+		if err != nil {
+			errs = append(errs, "探测失败: "+err.Error())
+		} else {
+			resp.Probe = &summary
+		}
+	}
+	resp.Error = strings.Join(errs, "; ")
+	s.eventHub().Broadcast(Event{Type: "handoff", Data: resp})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleLoginStatus reports whether the stored SESSDATA is still accepted and,

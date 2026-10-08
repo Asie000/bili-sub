@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -533,6 +534,143 @@ func TestCORSRejectsForeignOrigin(t *testing.T) {
 	s := newTestServer(t, Options{})
 	req := httptest.NewRequest(http.MethodOptions, "/api/probe", nil)
 	req.Header.Set("Origin", "https://evil.example.com")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("foreign origin was granted CORS: %q", got)
+	}
+}
+
+// TestHandoffEndpointLogsInProbesAndHidesTheCookie pins the extension bridge:
+// the posted cookie reaches Login with its SESSDATA derived, the posted URL
+// reaches Probe, the probe summary is returned, and no cookie value leaks into
+// the response body.
+func TestHandoffEndpointLogsInProbesAndHidesTheCookie(t *testing.T) {
+	const cookie = "SESSDATA=abc%2Cdef; buvid3=B3; bili_ticket=XYZ"
+	const target = "https://www.bilibili.com/video/BV1uv411q7Mv"
+
+	var gotSessdata, gotCookie, gotURL string
+	calls := 0
+	s := newTestServer(t, Options{
+		Login: func(sessdata, c string) error {
+			calls++
+			gotSessdata, gotCookie = sessdata, c
+			return nil
+		},
+		Probe: func(_ context.Context, url string) (ProbeSummary, error) {
+			calls++
+			gotURL = url
+			return ProbeSummary{Probed: 1, Downloadable: 1}, nil
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/handoff",
+		fmt.Sprintf(`{"cookie":%q,"url":%q}`, cookie, target))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if calls != 2 {
+		t.Fatalf("seams called %d times, want Login and Probe once each", calls)
+	}
+	if gotCookie != cookie {
+		t.Fatalf("Login received cookie %q, want the posted full cookie", gotCookie)
+	}
+	if gotSessdata != "abc%2Cdef" {
+		t.Fatalf("Login received sessdata %q, want the value derived from the cookie", gotSessdata)
+	}
+	if gotURL != target {
+		t.Fatalf("Probe received %q, want %q", gotURL, target)
+	}
+	var got HandoffResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if !got.OK || !got.LoggedIn {
+		t.Fatalf("response = %+v, want ok and logged_in", got)
+	}
+	if got.Probe == nil || got.Probe.Downloadable != 1 {
+		t.Fatalf("probe = %+v, want the seam summary", got.Probe)
+	}
+	for _, secret := range []string{cookie, "SESSDATA", "bili_ticket"} {
+		if strings.Contains(rec.Body.String(), secret) {
+			t.Fatalf("response %q leaks %q", rec.Body.String(), secret)
+		}
+	}
+}
+
+// TestHandoffEndpointReportsLoginErrorButStillProbes pins the "still attempt the
+// probe" rule: a failing Login is reported in error, but Probe still runs.
+func TestHandoffEndpointReportsLoginErrorButStillProbes(t *testing.T) {
+	probed := false
+	s := newTestServer(t, Options{
+		Login: func(string, string) error { return errors.New("sessdata 校验失败") },
+		Probe: func(context.Context, string) (ProbeSummary, error) {
+			probed = true
+			return ProbeSummary{Probed: 2}, nil
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/handoff",
+		`{"cookie":"SESSDATA=abc; buvid3=B3","url":"https://www.bilibili.com/video/BV1"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !probed {
+		t.Fatal("Probe must still run after a Login error")
+	}
+	var got HandoffResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if got.LoggedIn {
+		t.Fatalf("response = %+v, want logged_in=false after a Login error", got)
+	}
+	if !strings.Contains(got.Error, "校验失败") {
+		t.Fatalf("error = %q, want the Login error reported", got.Error)
+	}
+	if got.Probe == nil || got.Probe.Probed != 2 {
+		t.Fatalf("probe = %+v, want the seam summary", got.Probe)
+	}
+}
+
+func TestHandoffEndpointRejectsEmptyCookieAndURL(t *testing.T) {
+	s := newTestServer(t, Options{})
+
+	rec := serve(t, s, http.MethodPost, "/api/handoff", `{}`)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400", rec.Code)
+	}
+}
+
+// TestCORSPreflightFromExtensionIsAllowed pins that the Firefox and Chrome
+// extension origins may call the API, with their own origin echoed back.
+func TestCORSPreflightFromExtensionIsAllowed(t *testing.T) {
+	s := newTestServer(t, Options{})
+	for _, origin := range []string{"moz-extension://abcd-1234", "chrome-extension://abcdefghijklmnop"} {
+		req := httptest.NewRequest(http.MethodOptions, "/api/handoff", nil)
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Access-Control-Request-Method", "POST")
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("%s: code = %d, want 204", origin, rec.Code)
+		}
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != origin {
+			t.Fatalf("%s: allow-origin = %q, want the extension origin echoed", origin, got)
+		}
+	}
+}
+
+func TestHandoffCORSRejectsForeignOrigin(t *testing.T) {
+	s := newTestServer(t, Options{})
+	req := httptest.NewRequest(http.MethodPost, "/api/handoff", strings.NewReader(`{"url":"https://www.bilibili.com/video/BV1"}`))
+	req.Header.Set("Origin", "https://evil.example.com")
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
 
