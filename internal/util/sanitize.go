@@ -1,6 +1,9 @@
 package util
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 var badChars = strings.NewReplacer(
 	`\`, "_", `/`, "_", `:`, "_", `*`, "_", `?`, "_",
@@ -10,6 +13,12 @@ var badChars = strings.NewReplacer(
 
 func SanitizeFilename(title, bvid string) string {
 	s := badChars.Replace(title)
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
 	s = strings.TrimSpace(s)
 	r := []rune(s)
 	const maxTitle = 100

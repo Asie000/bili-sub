@@ -26,3 +26,11 @@ func TestSanitizeTruncate(t *testing.T) {
 		t.Fatalf("must keep bvid suffix: %q", got)
 	}
 }
+
+func TestSanitizeStripsControlChars(t *testing.T) {
+	got := SanitizeFilename("a\x00b\x0bc", "BV1")
+	want := "abc [BV1]"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}

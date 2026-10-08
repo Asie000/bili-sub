@@ -25,10 +25,44 @@ func Render(d *ir.Document, format string) ([]byte, error) {
 	case FormatMarkdown:
 		return renderMD(d), nil
 	case FormatJSON:
-		return json.MarshalIndent(d, "", "  ")
+		return renderJSON(d)
 	default:
 		return nil, fmt.Errorf("unsupported format: %s", format)
 	}
+}
+
+// jsonSegment carries subtitle text only: non-srt formats must expose no timeline.
+type jsonSegment struct {
+	Text    string `json:"text"`
+	Speaker string `json:"speaker,omitempty"`
+}
+
+type jsonDocument struct {
+	Bvid     string        `json:"bvid"`
+	Cid      int64         `json:"cid"`
+	Title    string        `json:"title"`
+	Author   string        `json:"author"`
+	Lang     string        `json:"lang"`
+	Segments []jsonSegment `json:"segments"`
+}
+
+func renderJSON(d *ir.Document) ([]byte, error) {
+	var segs []jsonSegment
+	if d.Segments != nil {
+		segs = make([]jsonSegment, 0, len(d.Segments))
+		for _, seg := range d.Segments {
+			segs = append(segs, jsonSegment{Text: seg.Text, Speaker: seg.Speaker})
+		}
+	}
+	doc := jsonDocument{
+		Bvid:     d.Bvid,
+		Cid:      d.Cid,
+		Title:    d.Title,
+		Author:   d.Author,
+		Lang:     d.Lang,
+		Segments: segs,
+	}
+	return json.MarshalIndent(doc, "", "  ")
 }
 
 func ts(ms int64) string {
@@ -41,11 +75,14 @@ func ts(ms int64) string {
 
 func renderSRT(d *ir.Document) []byte {
 	var b bytes.Buffer
-	for i, seg := range d.Segments {
-		if strings.TrimSpace(seg.Text) == "" {
+	n := 0
+	for _, seg := range d.Segments {
+		t := strings.TrimSpace(seg.Text)
+		if t == "" {
 			continue
 		}
-		fmt.Fprintf(&b, "%d\n%s --> %s\n%s\n\n", i+1, ts(seg.StartMs), ts(seg.EndMs), strings.TrimSpace(seg.Text))
+		n++
+		fmt.Fprintf(&b, "%d\n%s --> %s\n%s\n\n", n, ts(seg.StartMs), ts(seg.EndMs), t)
 	}
 	return b.Bytes()
 }
