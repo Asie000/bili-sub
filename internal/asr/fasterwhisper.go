@@ -28,6 +28,9 @@ type FasterWhisper struct {
 	wk  *worker
 }
 
+// Compile-time proof that FasterWhisper is a Backend.
+var _ Backend = (*FasterWhisper)(nil)
+
 // NewFasterWhisper builds a backend. pythonPath defaults to "python"; model is
 // the default model for requests that leave Options.Model empty.
 func NewFasterWhisper(pythonPath, scriptPath, model string) *FasterWhisper {

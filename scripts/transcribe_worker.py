@@ -29,6 +29,21 @@ import sys
 
 DEFAULT_MODEL = "small"
 
+
+def force_utf8_stdio():
+    """Pin the pipes to UTF-8 regardless of the OS locale.
+
+    On Windows the stdio encoding follows the active code page (e.g. cp936 on
+    zh-CN), so Chinese audio paths arriving from Go would be mojibake and the
+    segment text written back would be unreadable. The Go side always speaks
+    UTF-8, so both directions are reconfigured once at startup. Guarded because
+    the attribute only exists on TextIOWrapper (and the stream may be None).
+    """
+    for stream in (sys.stdin, sys.stdout):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
+
 # Loaded model cache: loading is expensive, so one WhisperModel is reused until
 # a request asks for a different model name.
 _model = None
@@ -51,6 +66,7 @@ def load_model(name):
 
 
 def main():
+    force_utf8_stdio()
     for line in sys.stdin:
         line = line.strip()
         if not line:
