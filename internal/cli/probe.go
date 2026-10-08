@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -12,6 +15,11 @@ import (
 	"bilibili-sub/internal/pipeline"
 	"bilibili-sub/internal/store"
 )
+
+// probeProgressInterval throttles the per-video progress callback to about five
+// calls per second, so a large source does not flood the SSE stream. The final
+// done==total call always goes through.
+const probeProgressInterval = 200 * time.Millisecond
 
 func newProbeCmd() *cobra.Command {
 	return &cobra.Command{
@@ -24,7 +32,7 @@ func newProbeCmd() *cobra.Command {
 				return err
 			}
 			defer rt.close()
-			_, err = rt.probe(cmd.Context(), cmd.OutOrStdout(), args[0])
+			_, err = rt.probe(cmd.Context(), cmd.OutOrStdout(), args[0], "", nil)
 			return err
 		},
 	}
@@ -48,9 +56,21 @@ type probeOutcome struct {
 	err    error
 }
 
-func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL string) (probeStats, error) {
+func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec string, onProgress func(done, total int)) (probeStats, error) {
 	var stats probeStats
-	kind, key, err := pipeline.ParseURL(rawURL)
+	var kind pipeline.SourceKind
+	var key string
+	var err error
+	if kindSpec != "" {
+		explicit, ok := pipeline.ParseSourceKind(kindSpec)
+		if !ok {
+			return stats, fmt.Errorf("probe: 未知来源类型 %q", kindSpec)
+		}
+		kind = explicit
+		key, err = pipeline.ParseURLForKind(rawURL, kind)
+	} else {
+		kind, key, err = pipeline.ParseURL(rawURL)
+	}
 	if err != nil {
 		return stats, err
 	}
@@ -86,9 +106,32 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL string) (prob
 	}
 	stats.Total = len(videos)
 
+	// Report progress from the workers. The setter is shared by every worker
+	// goroutine, so the throttle guard and the counter are synchronized; the
+	// callback itself runs outside the lock so a slow SSE broadcast cannot
+	// serialize the workers.
+	var doneCount int64
+	var progMu sync.Mutex
+	var lastProg time.Time
+	emitProgress := func(done, total int) {
+		if onProgress == nil {
+			return
+		}
+		progMu.Lock()
+		if done < total && time.Since(lastProg) < probeProgressInterval {
+			progMu.Unlock()
+			return
+		}
+		lastProg = time.Now()
+		progMu.Unlock()
+		onProgress(done, total)
+	}
+	emitProgress(0, stats.Total)
+
 	prober := pipeline.NewProber(client, st, en)
 	outcomes := pipeline.Run(ctx, videos, r.cfg.Concurrency, func(ctx context.Context, v store.Video) (probeOutcome, error) {
 		res, err := prober.ProbeVideo(ctx, v)
+		emitProgress(int(atomic.AddInt64(&doneCount, 1)), stats.Total)
 		if err == nil {
 			return probeOutcome{result: res}, nil
 		}

@@ -50,6 +50,24 @@ func (s *Store) ListVideos(state string) ([]Video, error) {
 	if err != nil {
 		return nil, err
 	}
+	return scanVideos(rows)
+}
+
+// ListVideosBySource returns every row belonging to one parsed source (the key
+// stored in source_key), ordered by id. It is what scopes the web UI's list to
+// the source the user just probed.
+func (s *Store) ListVideosBySource(source string) ([]Video, error) {
+	rows, err := s.db.Query(`SELECT id,bvid,cid,aid,author,title,pubdate,duration,page_index,part,is_charging,state,lang,source_key FROM videos WHERE source_key=? ORDER BY id`, source)
+	if err != nil {
+		return nil, err
+	}
+	return scanVideos(rows)
+}
+
+// scanVideos drains a videos query into a slice, normalizing the zero-row case
+// so callers (e.g. JSON API handlers) get an empty list instead of a nil slice
+// that marshals to null.
+func scanVideos(rows *sql.Rows) ([]Video, error) {
 	defer rows.Close()
 	var out []Video
 	for rows.Next() {
@@ -62,8 +80,6 @@ func (s *Store) ListVideos(state string) ([]Video, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// Normalize the zero-row case so callers (e.g. JSON API handlers) get an
-	// empty list instead of a nil slice that marshals to null.
 	if out == nil {
 		out = []Video{}
 	}

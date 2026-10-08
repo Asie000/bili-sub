@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"bilibili-sub/internal/bili"
+	"bilibili-sub/internal/pipeline"
 	"bilibili-sub/internal/store"
 )
 
@@ -22,6 +23,14 @@ type ProbeSummary struct {
 	NoSubtitle     int `json:"no_subtitle"`
 	ChargingLocked int `json:"charging_locked"`
 	Failed         int `json:"failed"`
+}
+
+// ProbeProgress is one probe-progress tick, streamed as an SSE
+// `probe_progress` event so the page can show 已处理 done/total while a large
+// source is being probed.
+type ProbeProgress struct {
+	Done  int `json:"done"`
+	Total int `json:"total"`
 }
 
 // DownloadSummary is the outcome of one download run, as returned by
@@ -54,7 +63,7 @@ type HandoffResponse struct {
 // panicking. Hub may be nil, in which case the server creates one.
 type Options struct {
 	Store       *store.Store
-	Probe       func(ctx context.Context, url string) (ProbeSummary, error)
+	Probe       func(ctx context.Context, url, kind string, onProgress func(ProbeProgress)) (ProbeSummary, error)
 	Download    func(ctx context.Context, lang string, transcribe bool) (DownloadSummary, error)
 	Export      func(ctx context.Context, formats []string) (string, error)
 	Login       func(sessdata, cookie string) error
@@ -157,16 +166,26 @@ func withCORS(next http.Handler) http.Handler {
 	})
 }
 
-// handleVideos returns every stored video. store.Video has no JSON tags, so the
-// embedded page reads the Go field names (Title, Author, Pubdate, State, Lang,
-// IsCharging, ...). ListVideos already normalizes zero rows to a non-nil slice,
-// and the guard keeps the response `[]` rather than `null`.
+// handleVideos returns the stored videos. With a ?source= query it returns only
+// the rows belonging to that parsed source key, which is how the page scopes the
+// list to the source the user just probed; without it, every row. store.Video
+// has no JSON tags, so the embedded page reads the Go field names (Title,
+// Author, Pubdate, State, Lang, IsCharging, ...). Both store list methods
+// normalize zero rows to a non-nil slice, and the guard keeps the response `[]`
+// rather than `null`.
 func (s *Server) handleVideos(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Store == nil {
 		writeError(w, http.StatusNotImplemented, "store 未配置")
 		return
 	}
-	videos, err := s.opts.Store.ListVideos("")
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
+	var videos []store.Video
+	var err error
+	if source != "" {
+		videos, err = s.opts.Store.ListVideosBySource(source)
+	} else {
+		videos, err = s.opts.Store.ListVideos("")
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -201,7 +220,8 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		URL string `json:"url"`
+		URL  string `json:"url"`
+		Kind string `json:"kind"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
@@ -211,13 +231,41 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "url 不能为空")
 		return
 	}
-	summary, err := s.opts.Probe(r.Context(), req.URL)
+	// Resolve the source key and canonical kind here so the response can tell the
+	// page which source was probed. An explicitly chosen kind wins; otherwise the
+	// URL is auto-detected exactly as the CLI does.
+	var kind pipeline.SourceKind
+	var source string
+	var parseErr error
+	if explicit, ok := pipeline.ParseSourceKind(req.Kind); ok {
+		kind = explicit
+		source, parseErr = pipeline.ParseURLForKind(req.URL, kind)
+	} else {
+		kind, source, parseErr = pipeline.ParseURL(req.URL)
+	}
+	if parseErr != nil {
+		writeError(w, http.StatusBadRequest, "无法解析链接: "+parseErr.Error())
+		return
+	}
+
+	onProgress := func(p ProbeProgress) {
+		s.eventHub().Broadcast(Event{Type: "probe_progress", Data: p})
+	}
+	summary, err := s.opts.Probe(r.Context(), req.URL, req.Kind, onProgress)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	s.eventHub().Broadcast(Event{Type: "probe", Data: summary})
-	writeJSON(w, http.StatusOK, summary)
+	writeJSON(w, http.StatusOK, probeResponse{ProbeSummary: summary, Source: source, Kind: kind.String()})
+}
+
+// probeResponse is POST /api/probe's body: the familiar summary fields plus the
+// parsed source key and canonical kind, which the page stores to scope its list.
+type probeResponse struct {
+	ProbeSummary
+	Source string `json:"source"`
+	Kind   string `json:"kind"`
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {

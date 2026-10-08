@@ -60,6 +60,72 @@ func TestSourceKindString(t *testing.T) {
 	}
 }
 
+func TestParseURLForKind(t *testing.T) {
+	cases := []struct {
+		in   string
+		kind SourceKind
+		key  string
+	}{
+		{"https://www.bilibili.com/video/BV1uv411q7Mv", KindSingle, "BV1uv411q7Mv"},
+		{"BV1uv411q7Mv", KindSingle, "BV1uv411q7Mv"},
+		{"https://space.bilibili.com/12345", KindSpace, "12345"},
+		{"https://space.bilibili.com/12345/video", KindSpace, "12345"},
+		{"https://www.bilibili.com/medialist/play/12345?business=space", KindSpace, "12345"},
+		{"12345", KindSpace, "12345"},
+		{"https://api.bilibili.com/x/v3/fav/resource/list?media_id=999", KindFav, "999"},
+		{"https://www.bilibili.com/medialist/detail/ml999", KindFav, "999"},
+		{"https://example.com/fav?fid=777", KindFav, "777"},
+		{"999", KindFav, "999"},
+	}
+	for _, c := range cases {
+		key, err := ParseURLForKind(c.in, c.kind)
+		if err != nil {
+			t.Fatalf("%s as %s: %v", c.in, c.kind, err)
+		}
+		if key != c.key {
+			t.Fatalf("%s as %s: got %q want %q", c.in, c.kind, key, c.key)
+		}
+	}
+}
+
+func TestParseURLForKindError(t *testing.T) {
+	cases := []struct {
+		in   string
+		kind SourceKind
+	}{
+		{"https://space.bilibili.com/12345", KindSingle},
+		{"BV1uv411q7Mv", KindSpace},
+		{"https://example.com/foo", KindFav},
+		{"", KindSingle},
+	}
+	for _, c := range cases {
+		if key, err := ParseURLForKind(c.in, c.kind); err == nil {
+			t.Fatalf("ParseURLForKind(%q, %s) = %q, want error", c.in, c.kind, key)
+		}
+	}
+}
+
+func TestParseSourceKind(t *testing.T) {
+	cases := []struct {
+		in   string
+		kind SourceKind
+		ok   bool
+	}{
+		{"single", KindSingle, true},
+		{"SPACE", KindSpace, true},
+		{"Fav", KindFav, true},
+		{" fav ", KindFav, true},
+		{"", 0, false},
+		{"video", 0, false},
+	}
+	for _, c := range cases {
+		kind, ok := ParseSourceKind(c.in)
+		if ok != c.ok || (ok && kind != c.kind) {
+			t.Fatalf("ParseSourceKind(%q) = (%v,%v), want (%v,%v)", c.in, kind, ok, c.kind, c.ok)
+		}
+	}
+}
+
 func TestNewEnumeratorDefaults(t *testing.T) {
 	e := NewEnumerator(bili.NewClient("", nopLimiter{}))
 	if e.NavURL != "https://api.bilibili.com/x/web-interface/nav" {

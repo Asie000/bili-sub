@@ -129,23 +129,23 @@ func TestStatsEndpointCountsStates(t *testing.T) {
 	}
 }
 
-func TestProbeEndpointPassesURLToSeam(t *testing.T) {
+func TestProbeEndpointPassesURLAndKindToSeam(t *testing.T) {
 	const target = "https://www.bilibili.com/video/BV1uv411q7Mv"
-	var gotURL string
+	var gotURL, gotKind string
 	s := newTestServer(t, Options{
-		Probe: func(_ context.Context, url string) (ProbeSummary, error) {
-			gotURL = url
+		Probe: func(_ context.Context, url, kind string, _ func(ProbeProgress)) (ProbeSummary, error) {
+			gotURL, gotKind = url, kind
 			return ProbeSummary{Probed: 1, Downloadable: 1}, nil
 		},
 	})
 
-	rec := serve(t, s, http.MethodPost, "/api/probe", fmt.Sprintf(`{"url":%q}`, target))
+	rec := serve(t, s, http.MethodPost, "/api/probe", fmt.Sprintf(`{"url":%q,"kind":"single"}`, target))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
-	if gotURL != target {
-		t.Fatalf("seam received %q, want %q", gotURL, target)
+	if gotURL != target || gotKind != "single" {
+		t.Fatalf("seam received url=%q kind=%q, want %q/single", gotURL, gotKind, target)
 	}
 	var got ProbeSummary
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -158,7 +158,7 @@ func TestProbeEndpointPassesURLToSeam(t *testing.T) {
 
 func TestProbeEndpointRejectsEmptyURL(t *testing.T) {
 	s := newTestServer(t, Options{
-		Probe: func(_ context.Context, _ string) (ProbeSummary, error) {
+		Probe: func(_ context.Context, _, _ string, _ func(ProbeProgress)) (ProbeSummary, error) {
 			t.Error("probe seam must not be called for an empty url")
 			return ProbeSummary{}, nil
 		},
@@ -178,6 +178,163 @@ func TestProbeEndpointWithoutSeamReturns501(t *testing.T) {
 
 	if rec.Code != http.StatusNotImplemented {
 		t.Fatalf("code = %d, want 501", rec.Code)
+	}
+}
+
+// TestProbeEndpointResponseCarriesSourceAndKind pins the page-facing contract:
+// the response names the parsed source key and its canonical kind so the page
+// can scope its list to the source it just probed.
+func TestProbeEndpointResponseCarriesSourceAndKind(t *testing.T) {
+	s := newTestServer(t, Options{
+		Probe: func(context.Context, string, string, func(ProbeProgress)) (ProbeSummary, error) {
+			return ProbeSummary{Probed: 2}, nil
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/probe", `{"url":"https://space.bilibili.com/12345"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		ProbeSummary
+		Source string `json:"source"`
+		Kind   string `json:"kind"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if got.Source != "12345" || got.Kind != "space" {
+		t.Fatalf("response = %+v, want source=12345 kind=space", got)
+	}
+	if got.Probed != 2 {
+		t.Fatalf("probed = %d, want the summary fields still present", got.Probed)
+	}
+}
+
+// TestProbeEndpointExplicitKindOverridesAutoDetection pins the type selector:
+// a bare numeric id is ambiguous, so an explicit fav kind must resolve it even
+// though ParseURL alone would reject it.
+func TestProbeEndpointExplicitKindOverridesAutoDetection(t *testing.T) {
+	s := newTestServer(t, Options{
+		Probe: func(context.Context, string, string, func(ProbeProgress)) (ProbeSummary, error) {
+			return ProbeSummary{Probed: 1}, nil
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/probe", `{"url":"999","kind":"fav"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Source string `json:"source"`
+		Kind   string `json:"kind"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if got.Source != "999" || got.Kind != "fav" {
+		t.Fatalf("response = %+v, want source=999 kind=fav", got)
+	}
+}
+
+func TestProbeEndpointRejectsUnparseableURL(t *testing.T) {
+	s := newTestServer(t, Options{
+		Probe: func(context.Context, string, string, func(ProbeProgress)) (ProbeSummary, error) {
+			t.Error("probe seam must not be called for an unparseable url")
+			return ProbeSummary{}, nil
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/probe", `{"url":"https://example.com/foo"}`)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400", rec.Code)
+	}
+}
+
+// TestProbeEndpointBroadcastsProgress pins that the seam's onProgress ticks are
+// streamed as probe_progress events, including a start (0/N) and the final
+// (N/N) tick the page uses to finish the progress line.
+func TestProbeEndpointBroadcastsProgress(t *testing.T) {
+	hub := NewHub()
+	events, cancel := hub.Subscribe()
+	defer cancel()
+	s := newTestServer(t, Options{
+		Hub: hub,
+		Probe: func(_ context.Context, _, _ string, onProgress func(ProbeProgress)) (ProbeSummary, error) {
+			onProgress(ProbeProgress{Done: 0, Total: 3})
+			onProgress(ProbeProgress{Done: 3, Total: 3})
+			return ProbeSummary{Probed: 3}, nil
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/probe", `{"url":"BV1uv411q7Mv"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// The handler broadcasts synchronously, so every event is already buffered.
+	var progress []ProbeProgress
+drain:
+	for {
+		select {
+		case ev := <-events:
+			if ev.Type != "probe_progress" {
+				continue
+			}
+			p, ok := ev.Data.(ProbeProgress)
+			if !ok {
+				t.Fatalf("probe_progress data has type %T, want ProbeProgress", ev.Data)
+			}
+			progress = append(progress, p)
+		default:
+			break drain
+		}
+	}
+	if len(progress) != 2 {
+		t.Fatalf("probe_progress events = %v, want a start and a final tick", progress)
+	}
+	if progress[0] != (ProbeProgress{Done: 0, Total: 3}) {
+		t.Fatalf("first tick = %+v, want the start tick 0/3", progress[0])
+	}
+	if progress[1] != (ProbeProgress{Done: 3, Total: 3}) {
+		t.Fatalf("last tick = %+v, want the final tick 3/3", progress[1])
+	}
+}
+
+// TestVideosEndpointFiltersBySource pins GET /api/videos?source=: it returns only
+// the rows of the named source, while no source returns every row.
+func TestVideosEndpointFiltersBySource(t *testing.T) {
+	st := openStore(t)
+	if _, err := st.UpsertVideo(&store.Video{Bvid: "BV1aaaa", Cid: 1, SourceKey: "12345", State: store.StatePending}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if _, err := st.UpsertVideo(&store.Video{Bvid: "BV1bbbb", Cid: 1, SourceKey: "99999", State: store.StatePending}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	s := New(Options{Store: st})
+
+	rec := serve(t, s, http.MethodGet, "/api/videos?source=12345", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rec.Code)
+	}
+	var filtered []store.Video
+	if err := json.Unmarshal(rec.Body.Bytes(), &filtered); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if len(filtered) != 1 || filtered[0].Bvid != "BV1aaaa" {
+		t.Fatalf("filtered = %+v, want only BV1aaaa", filtered)
+	}
+
+	rec = serve(t, s, http.MethodGet, "/api/videos", "")
+	var all []store.Video
+	if err := json.Unmarshal(rec.Body.Bytes(), &all); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("all = %+v, want both rows without a source filter", all)
 	}
 }
 
@@ -437,7 +594,7 @@ func TestZeroValueServerEventsDoesNotPanic(t *testing.T) {
 // not panic when a seam result is published.
 func TestServerWithNilHubBroadcastsSafely(t *testing.T) {
 	s := &Server{opts: Options{
-		Probe: func(context.Context, string) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, func(ProbeProgress)) (ProbeSummary, error) {
 			return ProbeSummary{Probed: 1}, nil
 		},
 	}}
@@ -514,7 +671,9 @@ func TestLoginStatusFailureReportsLoggedOutWithoutLeakingTheError(t *testing.T) 
 
 func TestCORSPreflightFromBilibiliIsAllowed(t *testing.T) {
 	s := newTestServer(t, Options{
-		Probe: func(context.Context, string) (ProbeSummary, error) { return ProbeSummary{}, nil },
+		Probe: func(context.Context, string, string, func(ProbeProgress)) (ProbeSummary, error) {
+			return ProbeSummary{}, nil
+		},
 	})
 	req := httptest.NewRequest(http.MethodOptions, "/api/probe", nil)
 	req.Header.Set("Origin", "https://www.bilibili.com")
@@ -562,7 +721,7 @@ func TestHandoffEndpointSavesLoginAndReturnsURLWithoutProbing(t *testing.T) {
 		LoginStatus: func(context.Context) (LoginState, error) {
 			return LoginState{LoggedIn: true, Uname: "测试用户"}, nil
 		},
-		Probe: func(context.Context, string) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, func(ProbeProgress)) (ProbeSummary, error) {
 			probed = true
 			return ProbeSummary{}, nil
 		},
@@ -609,7 +768,7 @@ func TestHandoffEndpointReportsLoginErrorWithoutProbing(t *testing.T) {
 	probed := false
 	s := newTestServer(t, Options{
 		Login: func(string, string) error { return errors.New("sessdata 校验失败") },
-		Probe: func(context.Context, string) (ProbeSummary, error) {
+		Probe: func(context.Context, string, string, func(ProbeProgress)) (ProbeSummary, error) {
 			probed = true
 			return ProbeSummary{Probed: 2}, nil
 		},

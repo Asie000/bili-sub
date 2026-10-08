@@ -6,6 +6,11 @@
 
 const $ = (id) => document.getElementById(id);
 
+// state.currentSource is the parsed source key of the source just probed. The
+// list is scoped to it unless "显示全部来源" is checked, so probing a second
+// source replaces the visible list instead of mixing it with the first.
+const state = { currentSource: "" };
+
 const STATE_LABELS = {
   pending: "待处理",
   probed: "已探测",
@@ -100,7 +105,12 @@ function renderTable(videos) {
 
 async function loadVideos() {
   try {
-    const videos = await api("/api/videos");
+    let path = "/api/videos";
+    const showAll = $("show-all") && $("show-all").checked;
+    if (!showAll && state.currentSource) {
+      path += `?source=${encodeURIComponent(state.currentSource)}`;
+    }
+    const videos = await api(path);
     renderTable(videos);
     await loadStats();
   } catch (err) {
@@ -125,13 +135,26 @@ async function probe() {
     log("请输入链接再探测。");
     return;
   }
+  const button = $("probe");
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "探测中…";
+  $("probe-progress").textContent = "";
   log(`开始探测：${url}`);
   try {
-    const summary = await post("/api/probe", { url });
-    log(`探测完成：共 ${summary.probed}，可下载 ${summary.downloadable}，无字幕 ${summary.no_subtitle}，充电锁定 ${summary.charging_locked}，失败 ${summary.failed}`);
+    const summary = await post("/api/probe", { url, kind: $("kind").value });
+    state.currentSource = summary.source || "";
+    if (summary.probed === 0) {
+      log(`探测完成：该来源没有视频（来源 ${summary.kind || "?"} ${summary.source || ""}）。`);
+    } else {
+      log(`探测完成：共 ${summary.probed}，可下载 ${summary.downloadable}，无字幕 ${summary.no_subtitle}，充电锁定 ${summary.charging_locked}，失败 ${summary.failed}`);
+    }
     await loadVideos();
   } catch (err) {
     log(`探测失败：${err.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
   }
 }
 
@@ -170,6 +193,11 @@ async function exportZip() {
   } catch (err) {
     log(`导出失败：${err.message}`);
   }
+}
+
+// updateExportHint mirrors the checked export formats into the hint beside them.
+function updateExportHint() {
+  $("export-hint").textContent = `已选 ${selectedFormats().length} 种`;
 }
 
 // looksLikeCookie mirrors bili.LooksLikeCookie: a full browser Cookie header
@@ -287,6 +315,8 @@ function buildBookmarklet() {
 function clearTable() {
   $("videos-body").textContent = "";
   $("stats").textContent = "";
+  state.currentSource = "";
+  $("probe-progress").textContent = "";
   $("log").textContent = "";
   log("已清空列表与进度。");
 }
@@ -326,6 +356,11 @@ function connectEvents() {
   source.onmessage = (e) => {
     try {
       const ev = JSON.parse(e.data);
+      if (ev.type === "probe_progress") {
+        const data = ev.data || {};
+        $("probe-progress").textContent = `探测中… 已处理 ${data.done}/${data.total}`;
+        return;
+      }
       log(formatEvent(ev));
       if (ev.type === "login") {
         const ok = !!(ev.data && ev.data.ok);
@@ -355,6 +390,9 @@ function connectEvents() {
         }
       }
       if (ev.type === "probe" || ev.type === "download") {
+        if (ev.type === "probe") {
+          $("probe-progress").textContent = "";
+        }
         loadVideos();
       }
     } catch (err) {
@@ -377,6 +415,10 @@ $("refresh").addEventListener("click", loadVideos);
 $("clear").addEventListener("click", clearTable);
 $("save-sessdata").addEventListener("click", saveSessdata);
 $("qr-login").addEventListener("click", qrLogin);
+$("show-all").addEventListener("change", loadVideos);
+document.querySelectorAll(".export-format").forEach((box) =>
+  box.addEventListener("change", updateExportHint));
+updateExportHint();
 
 loadVideos();
 connectEvents();

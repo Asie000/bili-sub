@@ -103,6 +103,25 @@ table {
   border-collapse: collapse;
 }
 
+/* The list is a fixed-height scroll window with a sticky header, so a large
+   source does not push the rest of the page down. */
+.table-wrap {
+  max-height: 26rem;
+  overflow: auto;
+}
+
+.table-wrap thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg, #fff);
+  z-index: 1;
+}
+
+#probe-progress {
+  min-height: 1.2em;
+  margin-top: 0.5rem;
+}
+
 th,
 td {
   border-bottom: 1px solid var(--border);

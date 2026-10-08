@@ -38,6 +38,9 @@ var (
 	reMedialistPlay  = regexp.MustCompile(`medialist/play/(\d+)`)
 	reMediaID        = regexp.MustCompile(`media_id=(\d+)`)
 	reMedialistFavID = regexp.MustCompile(`medialist/detail/ml(\d+)`)
+	reFavMl          = regexp.MustCompile(`ml(\d+)`)
+	reFavFid         = regexp.MustCompile(`fid=(\d+)`)
+	reDigitsOnly     = regexp.MustCompile(`^\d+$`)
 )
 
 // ParseURL accepts a bilibili video/UP主/收藏夹 URL (with or without scheme, or
@@ -63,4 +66,67 @@ func ParseURL(raw string) (SourceKind, string, error) {
 		return KindSingle, m, nil
 	}
 	return 0, "", fmt.Errorf("unrecognized bilibili url or id: %q", raw)
+}
+
+// ParseURLForKind extracts the key for a source kind the user chose explicitly,
+// bypassing ParseURL's auto-detection. It is what lets the web UI's type
+// selector disambiguate a bare numeric id (space mid vs 收藏夹 id).
+func ParseURLForKind(raw string, kind SourceKind) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", errors.New("empty url")
+	}
+	switch kind {
+	case KindSingle:
+		if m := reBvid.FindString(s); m != "" {
+			return m, nil
+		}
+		return "", fmt.Errorf("无法从 %q 解析视频号（BV号）", raw)
+	case KindSpace:
+		if m := reSpaceMid.FindStringSubmatch(s); m != nil {
+			return m[1], nil
+		}
+		if m := reMedialistPlay.FindStringSubmatch(s); m != nil {
+			return m[1], nil
+		}
+		if reDigitsOnly.MatchString(s) {
+			return s, nil
+		}
+		return "", fmt.Errorf("无法从 %q 解析 UP主 mid", raw)
+	case KindFav:
+		if m := reMediaID.FindStringSubmatch(s); m != nil {
+			return m[1], nil
+		}
+		if m := reMedialistFavID.FindStringSubmatch(s); m != nil {
+			return m[1], nil
+		}
+		if m := reFavMl.FindStringSubmatch(s); m != nil {
+			return m[1], nil
+		}
+		if m := reFavFid.FindStringSubmatch(s); m != nil {
+			return m[1], nil
+		}
+		if reDigitsOnly.MatchString(s) {
+			return s, nil
+		}
+		return "", fmt.Errorf("无法从 %q 解析收藏夹 id", raw)
+	default:
+		return "", fmt.Errorf("未知来源类型 %s", kind)
+	}
+}
+
+// ParseSourceKind maps the web UI's type selector value to a SourceKind. An
+// empty or unknown string reports ok=false so the caller falls back to
+// ParseURL's auto-detection.
+func ParseSourceKind(s string) (SourceKind, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "single":
+		return KindSingle, true
+	case "space":
+		return KindSpace, true
+	case "fav":
+		return KindFav, true
+	default:
+		return 0, false
+	}
 }

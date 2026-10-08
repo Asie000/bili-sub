@@ -68,7 +68,7 @@ func TestServeSeamsSerializePipelineOperations(t *testing.T) {
 	rt.opMu.Lock()
 	defer rt.opMu.Unlock()
 
-	if _, err := opts.Probe(context.Background(), "not-a-url"); !errors.Is(err, errOperationBusy) {
+	if _, err := opts.Probe(context.Background(), "not-a-url", "", nil); !errors.Is(err, errOperationBusy) {
 		t.Errorf("Probe error = %v, want errOperationBusy", err)
 	}
 	if _, err := opts.Download(context.Background(), "", false); !errors.Is(err, errOperationBusy) {

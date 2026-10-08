@@ -138,6 +138,49 @@ func TestListVideosOrderedByID(t *testing.T) {
 	}
 }
 
+func TestListVideosBySource(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	rows := []Video{
+		{Bvid: "BV1", Cid: 1, SourceKey: "111", State: StatePending},
+		{Bvid: "BV2", Cid: 1, SourceKey: "222", State: StatePending},
+		{Bvid: "BV3", Cid: 1, SourceKey: "111", State: StatePending},
+	}
+	for i := range rows {
+		if _, err := s.UpsertVideo(&rows[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := s.ListVideosBySource("111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 rows for source 111, got %d (%+v)", len(got), got)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i-1].ID > got[i].ID {
+			t.Fatalf("not ordered by id: %+v", got)
+		}
+	}
+
+	empty, err := s.ListVideosBySource("nope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty == nil {
+		t.Fatal("want non-nil empty slice")
+	}
+	if len(empty) != 0 {
+		t.Fatalf("want 0 rows, got %d", len(empty))
+	}
+}
+
 func TestOpenMemoryConcurrent(t *testing.T) {
 	s, err := Open(":memory:")
 	if err != nil {

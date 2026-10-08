@@ -77,12 +77,18 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 	return server.Options{
 		Store: st,
 		Hub:   hub,
-		Probe: func(ctx context.Context, rawURL string) (server.ProbeSummary, error) {
+		Probe: func(ctx context.Context, rawURL, kind string, onProgress func(server.ProbeProgress)) (server.ProbeSummary, error) {
 			if !r.opMu.TryLock() {
 				return server.ProbeSummary{}, errOperationBusy
 			}
 			defer r.opMu.Unlock()
-			stats, err := r.probe(ctx, io.Discard, rawURL)
+			var progress func(done, total int)
+			if onProgress != nil {
+				progress = func(done, total int) {
+					onProgress(server.ProbeProgress{Done: done, Total: total})
+				}
+			}
+			stats, err := r.probe(ctx, io.Discard, rawURL, kind, progress)
 			if err != nil {
 				return server.ProbeSummary{}, err
 			}

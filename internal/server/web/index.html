@@ -34,9 +34,17 @@
   <section class="panel">
     <h2>来源</h2>
     <div class="row">
+      <select id="kind">
+        <option value="">自动识别</option>
+        <option value="single">单个视频</option>
+        <option value="space">UP主主页</option>
+        <option value="fav">收藏夹</option>
+      </select>
       <input id="url" type="text" placeholder="视频 / UP主空间 / 收藏夹 链接">
       <button id="probe">探测</button>
+      <label class="checkbox"><input type="checkbox" id="show-all"> 显示全部来源</label>
     </div>
+    <div id="probe-progress" class="hint"></div>
     <div class="row">
       <label for="lang">字幕语言</label>
       <select id="lang">
@@ -51,25 +59,28 @@
       <button id="clear">清空</button>
     </div>
     <div class="row" id="export-formats">
-      <span class="hint">导出格式</span>
+      <span class="hint">导出格式（可多选）</span>
       <label class="checkbox"><input class="export-format" type="checkbox" value="srt" checked> srt</label>
       <label class="checkbox"><input class="export-format" type="checkbox" value="txt"> txt</label>
       <label class="checkbox"><input class="export-format" type="checkbox" value="json"> json</label>
       <label class="checkbox"><input class="export-format" type="checkbox" value="md"> md</label>
+      <span id="export-hint" class="hint"></span>
     </div>
   </section>
 
   <section class="panel">
     <h2>视频列表 <span id="stats" class="hint"></span></h2>
-    <table>
-      <thead>
-        <tr>
-          <th>序号</th><th>标题</th><th>作者</th><th>发布日期</th>
-          <th>字幕状态</th><th>字幕语言</th><th>是否充电</th>
-        </tr>
-      </thead>
-      <tbody id="videos-body"></tbody>
-    </table>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>序号</th><th>标题</th><th>作者</th><th>发布日期</th>
+            <th>字幕状态</th><th>字幕语言</th><th>是否充电</th>
+          </tr>
+        </thead>
+        <tbody id="videos-body"></tbody>
+      </table>
+    </div>
   </section>
 
   <section class="panel">
