@@ -50,9 +50,15 @@ var chargingCodes = map[int]bool{
 }
 
 // ProbeVideo asks the player endpoint for a video's subtitles and persists the
-// resulting state. A charging/permission failure is not an error: it is a
-// recorded outcome (ChargingLocked), so the pipeline can skip the video.
+// resulting state. A charging/permission failure (see chargingCodes) is not an
+// error: it is a recorded outcome (ChargingLocked), so the pipeline can skip the
+// video. Every other failure — session expiry, rate limiting, risk control, a
+// transport error — is returned and leaves the row's state untouched, because
+// none of them mean the video is charge-locked.
 func (p *Prober) ProbeVideo(ctx context.Context, v store.Video) (*ProbeResult, error) {
+	if p.Client == nil || p.Store == nil {
+		return nil, errors.New("pipeline: Prober needs a non-nil Client and Store")
+	}
 	params := map[string]string{
 		"bvid": v.Bvid,
 		"cid":  strconv.FormatInt(v.Cid, 10),
@@ -76,21 +82,30 @@ func (p *Prober) ProbeVideo(ctx context.Context, v store.Video) (*ProbeResult, e
 	err := p.Client.Get(ctx, p.PlayerBaseURL, params, &resp)
 	if err != nil {
 		var apiErr *bili.APIError
-		if errors.As(err, &apiErr) && (chargingCodes[apiErr.Code] || v.IsCharging) {
+		if errors.As(err, &apiErr) && chargingCodes[apiErr.Code] {
 			return p.markChargingLocked(v)
 		}
 		return nil, err
 	}
 
+	// A track without a URL cannot be fetched; ignore those rather than
+	// marking the video downloadable, so Langs only ever lists usable tracks.
+	usable := make([]bili.SubtitleInfo, 0, len(resp.Subtitle.Subtitles))
+	for _, s := range resp.Subtitle.Subtitles {
+		if s.SubURL != "" {
+			usable = append(usable, s)
+		}
+	}
+
 	res := &ProbeResult{VideoID: v.ID, Bvid: v.Bvid}
-	if len(resp.Subtitle.Subtitles) == 0 {
+	if len(usable) == 0 {
 		if err := p.Store.SetState(v.ID, store.StateNoSubtitle, ""); err != nil {
 			return nil, err
 		}
 		return res, nil
 	}
 	lang := ""
-	if best, ok := PickLang(resp.Subtitle.Subtitles, ""); ok {
+	if best, ok := PickLang(usable, ""); ok {
 		lang = best.Lan
 	}
 	if err := p.Store.SetState(v.ID, store.StateDownloadable, lang); err != nil {
@@ -98,7 +113,7 @@ func (p *Prober) ProbeVideo(ctx context.Context, v store.Video) (*ProbeResult, e
 	}
 	res.HasSubtitle = true
 	res.CanDownload = true
-	res.Langs = resp.Subtitle.Subtitles
+	res.Langs = usable
 	return res, nil
 }
 

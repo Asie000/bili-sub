@@ -151,8 +151,9 @@ func TestProbeChargingLocked(t *testing.T) {
 }
 
 // TestProbeChargingLockedCodes pins which API failures count as "charging
-// locked": the no-permission/not-found/charging-seal codes on their own, and
-// any API error for a video already known to be charging.
+// locked": only the no-permission/not-found/charging-seal codes. A video known
+// to be charging does not turn an unrelated API error (e.g. -400 session
+// expiry) into a charge lock.
 func TestProbeChargingLockedCodes(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -164,13 +165,13 @@ func TestProbeChargingLockedCodes(t *testing.T) {
 		{"no permission code", -10403, false, true, false},
 		{"not found code", -404, false, true, false},
 		{"charging seal code", -62002, false, true, false},
-		{"charging video with other api error", -400, true, true, false},
+		{"charging video with other api error", -400, true, false, true},
 		{"other api error on free video", -400, false, false, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			st := newTestStore(t)
-			v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100, IsCharging: c.isCharging})
+			v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100, IsCharging: c.isCharging, State: store.StatePending})
 
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Write([]byte(`{"code":` + strconv.Itoa(c.code) + `,"message":"x"}`))
@@ -185,6 +186,12 @@ func TestProbeChargingLockedCodes(t *testing.T) {
 				if err == nil {
 					t.Fatalf("err=nil want non-nil (result=%+v)", res)
 				}
+				if res != nil {
+					t.Fatalf("res=%+v want nil on error", res)
+				}
+				if got := videoByID(t, st, v.ID); got.State != store.StatePending || got.Lang != "" {
+					t.Fatalf("state=%q lang=%q want %q/\"\" (unchanged)", got.State, got.Lang, store.StatePending)
+				}
 				return
 			}
 			if err != nil {
@@ -198,6 +205,124 @@ func TestProbeChargingLockedCodes(t *testing.T) {
 				t.Fatalf("state=%q want %q", got.State, wantState)
 			}
 		})
+	}
+}
+
+// TestProbeErrorLeavesStateUnchanged covers failures that are not charge locks:
+// an ordinary API error on a charging video and a non-API transport failure
+// must both surface as errors and leave the row untouched.
+func TestProbeErrorLeavesStateUnchanged(t *testing.T) {
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{"api error -400 on charging video", func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"code":-400,"message":"请求错误"}`))
+		}},
+		{"http 500 on charging video", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			st := newTestStore(t)
+			v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100, IsCharging: true, State: store.StatePending})
+
+			srv := httptest.NewServer(c.handler)
+			defer srv.Close()
+
+			p := NewProber(bili.NewClient("", nopLimiter{}), st, nil)
+			p.PlayerBaseURL = srv.URL
+
+			res, err := p.ProbeVideo(context.Background(), v)
+			if err == nil {
+				t.Fatalf("err=nil want non-nil (result=%+v)", res)
+			}
+			if res != nil {
+				t.Fatalf("res=%+v want nil on error", res)
+			}
+			if got := videoByID(t, st, v.ID); got.State != store.StatePending || got.Lang != "" {
+				t.Fatalf("state=%q lang=%q want %q/\"\" (unchanged)", got.State, got.Lang, store.StatePending)
+			}
+		})
+	}
+}
+
+// TestProbeNilDependencies guards against a nil Client/Store panic.
+func TestProbeNilDependencies(t *testing.T) {
+	st := newTestStore(t)
+	cases := []struct {
+		name string
+		p    *Prober
+	}{
+		{"nil client", &Prober{Store: st}},
+		{"nil store", &Prober{Client: bili.NewClient("", nopLimiter{})}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res, err := c.p.ProbeVideo(context.Background(), store.Video{ID: 1, Bvid: "BV1", Cid: 1})
+			if err == nil {
+				t.Fatalf("err=nil want non-nil (result=%+v)", res)
+			}
+		})
+	}
+}
+
+// TestProbeIgnoresTracksWithoutURL: a track with an empty subtitle_url cannot be
+// fetched, so on its own it must count as no subtitle rather than downloadable.
+func TestProbeIgnoresTracksWithoutURL(t *testing.T) {
+	st := newTestStore(t)
+	v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle":{"subtitles":[{"lan":"zh-CN","lan_doc":"中文（简体）","subtitle_url":""}]}}}`))
+	}))
+	defer srv.Close()
+
+	p := NewProber(bili.NewClient("", nopLimiter{}), st, nil)
+	p.PlayerBaseURL = srv.URL
+
+	res, err := p.ProbeVideo(context.Background(), v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.HasSubtitle || res.CanDownload || len(res.Langs) != 0 {
+		t.Fatalf("res=%+v want no subtitle", res)
+	}
+	if got := videoByID(t, st, v.ID); got.State != store.StateNoSubtitle {
+		t.Fatalf("state=%q want %q", got.State, store.StateNoSubtitle)
+	}
+}
+
+// TestProbeUsableTrackAmongDanglingOnes: only URL-bearing tracks are offered as
+// langs, so a usable track is still reported when dangling ones are present.
+func TestProbeUsableTrackAmongDanglingOnes(t *testing.T) {
+	st := newTestStore(t)
+	v := seedVideo(t, st, store.Video{Bvid: "BV1uv411q7Mv", Cid: 100})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle":{"subtitles":[
+			{"lan":"zh-CN","lan_doc":"中文（简体）","subtitle_url":""},
+			{"lan":"en-US","lan_doc":"English","subtitle_url":"//aisubtitle.hdslb.com/en.json"}]}}}`))
+	}))
+	defer srv.Close()
+
+	p := NewProber(bili.NewClient("", nopLimiter{}), st, nil)
+	p.PlayerBaseURL = srv.URL
+
+	res, err := p.ProbeVideo(context.Background(), v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.HasSubtitle || !res.CanDownload {
+		t.Fatalf("HasSubtitle=%v CanDownload=%v want true/true", res.HasSubtitle, res.CanDownload)
+	}
+	if len(res.Langs) != 1 || res.Langs[0].Lan != "en-US" {
+		t.Fatalf("langs=%+v want only en-US", res.Langs)
+	}
+	got := videoByID(t, st, v.ID)
+	if got.State != store.StateDownloadable || got.Lang != "en-US" {
+		t.Fatalf("state=%q lang=%q want %q/en-US", got.State, got.Lang, store.StateDownloadable)
 	}
 }
 
