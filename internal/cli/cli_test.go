@@ -1,0 +1,258 @@
+package cli
+
+import (
+	"archive/zip"
+	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"bilibili-sub/internal/bili"
+	"bilibili-sub/internal/ir"
+	"bilibili-sub/internal/store"
+)
+
+func TestRootHasCommands(t *testing.T) {
+	root := NewRootCmd()
+	want := map[string]bool{"login": true, "probe": true, "download": true, "export": true, "status": true, "serve": true}
+	for _, c := range root.Commands() {
+		delete(want, c.Name())
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing commands: %v", want)
+	}
+}
+
+// TestRootRegistersAllCommands pins the full command set from the design spec:
+// the brief's TestRootHasCommands only samples six of the nine.
+func TestRootRegistersAllCommands(t *testing.T) {
+	root := NewRootCmd()
+	want := []string{"download", "export", "login", "probe", "reset", "retry", "serve", "status", "transcribe"}
+	got := map[string]bool{}
+	for _, c := range root.Commands() {
+		got[c.Name()] = true
+	}
+	for _, name := range want {
+		if !got[name] {
+			t.Errorf("missing command %q", name)
+		}
+	}
+	if n := len(root.Commands()); n != len(want) {
+		t.Errorf("root has %d commands, want %d", n, len(want))
+	}
+}
+
+// execute runs the command tree with args and returns RunE's error. Output is
+// discarded so the table printers do not pollute test logs.
+func execute(args ...string) error {
+	root := NewRootCmd()
+	root.SetArgs(args)
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	return root.Execute()
+}
+
+func TestExportRejectsUnknownFormat(t *testing.T) {
+	// Keep config/store away from the developer's working tree even if a
+	// command starts touching the database before validating its flags.
+	t.Setenv("BILI_DATA_DIR", t.TempDir())
+
+	err := execute("export", "--format", "pdf")
+	if err == nil {
+		t.Fatal("export --format pdf: error = nil, want an unsupported-format error")
+	}
+	if !strings.Contains(err.Error(), "unsupported format") {
+		t.Fatalf("export --format pdf: error = %q, want it to mention unsupported format", err)
+	}
+}
+
+func TestResetRequiresYes(t *testing.T) {
+	t.Setenv("BILI_DATA_DIR", t.TempDir())
+
+	err := execute("reset")
+	if err == nil {
+		t.Fatal("reset without --yes: error = nil, want a confirmation error")
+	}
+	if !strings.Contains(err.Error(), "--yes") {
+		t.Fatalf("reset without --yes: error = %q, want it to mention --yes", err)
+	}
+}
+
+func TestResetWithYesDeletesDataDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BILI_DATA_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "keep.db"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed data dir: %v", err)
+	}
+
+	if err := execute("reset", "--yes"); err != nil {
+		t.Fatalf("reset --yes: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("reset --yes left %s behind (stat err = %v)", dir, err)
+	}
+}
+
+// TestExportWritesZipFromStoredTranscript exercises the export wiring without
+// the network: seed a fetched video + IR row, then run the command and inspect
+// the archive it produced.
+func TestExportWritesZipFromStoredTranscript(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BILI_DATA_DIR", dir)
+
+	st, err := store.Open(filepath.Join(dir, "bili_sub.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	id, err := st.UpsertVideo(&store.Video{Bvid: "BV1uv411q7Mv", Cid: 1, Title: "测试标题", State: store.StateFetched, PageIndex: 1})
+	if err != nil {
+		t.Fatalf("upsert video: %v", err)
+	}
+	doc := ir.Document{
+		Bvid: "BV1uv411q7Mv", Cid: 1, Title: "测试标题", Lang: "zh-Hans",
+		Segments: []ir.Segment{{StartMs: 0, EndMs: 1500, Text: "你好"}},
+	}
+	blob, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal IR: %v", err)
+	}
+	if err := st.SaveTranscript(id, "bilibili", "zh-Hans", string(blob)); err != nil {
+		t.Fatalf("save transcript: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	if err := execute("export", "--format", "srt,txt"); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+
+	zips, err := filepath.Glob(filepath.Join(dir, "exports", "*.zip"))
+	if err != nil {
+		t.Fatalf("glob exports: %v", err)
+	}
+	if len(zips) != 1 {
+		t.Fatalf("exported zips = %v, want exactly one", zips)
+	}
+	zr, err := zip.OpenReader(zips[0])
+	if err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	defer zr.Close()
+	if len(zr.File) != 2 {
+		t.Fatalf("zip entries = %d, want 2 (srt+txt)", len(zr.File))
+	}
+}
+
+// TestWriteSubtitleFormats pins the filename agreement with
+// pipeline.Downloader.FetchSubtitle: the downloader owns the .srt, the command
+// writes the other formats beside it, and only multi-P videos get a _P{n}
+// suffix.
+func TestWriteSubtitleFormats(t *testing.T) {
+	dir := t.TempDir()
+	v := store.Video{Bvid: "BV1uv411q7Mv", Title: "标题", PageIndex: 2}
+	doc := &ir.Document{
+		Bvid: "BV1uv411q7Mv", Title: "标题",
+		Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "你好"}},
+	}
+	if err := writeSubtitleFormats(dir, v, doc, []string{"srt", "txt", "json"}); err != nil {
+		t.Fatalf("writeSubtitleFormats: %v", err)
+	}
+
+	stem := "标题 [BV1uv411q7Mv]_P2"
+	if pageStem(v) != stem {
+		t.Fatalf("pageStem = %q, want %q", pageStem(v), stem)
+	}
+	if _, err := os.Stat(filepath.Join(dir, stem+".srt")); !os.IsNotExist(err) {
+		t.Errorf(".srt must be left to FetchSubtitle, stat err = %v", err)
+	}
+	for _, format := range []string{"txt", "json"} {
+		if _, err := os.Stat(filepath.Join(dir, stem+"."+format)); err != nil {
+			t.Errorf("%s.%s missing: %v", stem, format, err)
+		}
+	}
+}
+
+func TestParseFormats(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    []string
+		wantErr bool
+	}{
+		{name: "all four", in: "srt,txt,json,md", want: []string{"srt", "txt", "json", "md"}},
+		{name: "spaces and duplicates", in: " srt , txt , srt ", want: []string{"srt", "txt"}},
+		{name: "unknown", in: "srt,pdf", wantErr: true},
+		{name: "empty", in: "", wantErr: true},
+		{name: "only separators", in: " , ,", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseFormats(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseFormats(%q) = %v, want error", tt.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseFormats(%q): %v", tt.in, err)
+			}
+			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("parseFormats(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestExpandPages pins Ruling F: one store.Video per page, with the video-level
+// fallback when the API returns no pages list.
+func TestExpandPages(t *testing.T) {
+	t.Run("multi page", func(t *testing.T) {
+		vi := &bili.VideoInfo{
+			Bvid:     "BV1uv411q7Mv",
+			Cid:      99,
+			Title:    "合集",
+			Pubdate:  1700000000,
+			Duration: 600,
+			Owner:    bili.Owner{Name: "某UP"},
+			Pages: []bili.PageInfo{
+				{Cid: 1, Page: 1, Part: "第一集"},
+				{Cid: 2, Page: 2, Part: "第二集"},
+			},
+		}
+		vi.Rights.IsUpowerExclusive = true
+
+		got := expandPages(vi, "12345")
+		if len(got) != 2 {
+			t.Fatalf("expandPages len = %d, want 2", len(got))
+		}
+		want := []store.Video{
+			{Bvid: "BV1uv411q7Mv", Cid: 1, Author: "某UP", Title: "合集", Pubdate: 1700000000, Duration: 600, PageIndex: 1, Part: "第一集", IsCharging: true, State: store.StatePending, SourceKey: "12345"},
+			{Bvid: "BV1uv411q7Mv", Cid: 2, Author: "某UP", Title: "合集", Pubdate: 1700000000, Duration: 600, PageIndex: 2, Part: "第二集", IsCharging: true, State: store.StatePending, SourceKey: "12345"},
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("video[%d] = %+v, want %+v", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("no pages falls back to video cid", func(t *testing.T) {
+		vi := &bili.VideoInfo{Bvid: "BV1xx411c7mD", Cid: 7, Title: "单P"}
+		vi.IsUpowerExclusive = true
+
+		got := expandPages(vi, "BV1xx411c7mD")
+		if len(got) != 1 {
+			t.Fatalf("expandPages len = %d, want 1", len(got))
+		}
+		if got[0].Cid != 7 || got[0].PageIndex != 1 || got[0].Part != "" {
+			t.Errorf("video = %+v, want cid=7 page=1 part=\"\"", got[0])
+		}
+		if got[0].State != store.StatePending {
+			t.Errorf("State = %q, want %q", got[0].State, store.StatePending)
+		}
+	})
+}
