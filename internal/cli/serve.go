@@ -136,16 +136,16 @@ func (r *runtime) loginStatus(ctx context.Context) (server.LoginState, error) {
 	return server.LoginState{LoggedIn: ok, Uname: uname}, nil
 }
 
-// saveSession persists a SESSDATA and/or a full browser Cookie and verifies it
-// before reporting success, so a typo is reported instead of silently stored.
+// saveSession verifies a SESSDATA/full Cookie BEFORE persisting it, so a typo
+// or a stale value cannot clobber a working login.
 func (r *runtime) saveSession(sessdata, cookie string) error {
-	if err := bili.SaveSession(r.sessionPath(), sessdata, cookie); err != nil {
-		return err
-	}
 	client, err := r.client()
 	if err != nil {
 		return err
 	}
+	client.SESSDATA = sessdata
+	client.Cookie = cookie
+
 	ctx, cancel := context.WithTimeout(context.Background(), loginCheckTimeout)
 	defer cancel()
 	ok, err := client.CheckLogin(ctx)
@@ -153,9 +153,9 @@ func (r *runtime) saveSession(sessdata, cookie string) error {
 		return fmt.Errorf("login: 校验失败: %w", err)
 	}
 	if !ok {
-		return fmt.Errorf("login: 登录信息已保存，但校验未通过（未登录）")
+		return fmt.Errorf("login: 校验未通过（未登录），已保留原有登录信息")
 	}
-	return nil
+	return bili.SaveSession(r.sessionPath(), sessdata, cookie)
 }
 
 // qrResult is the single outcome the QR goroutine reports back to its request:

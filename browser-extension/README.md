@@ -19,10 +19,13 @@
 > 说明：这样临时载入的插件在**火狐重启后会失效**，需要重新按上面步骤载入一次。
 > 想长期保留必须把插件签名（提交到 addons.mozilla.org）后再安装。
 >
-> 如果火狐提示 `background.service_worker` 不受支持、无法载入，请用本目录下的
-> `manifest.firefox.json`：把它重命名为 `manifest.json`（覆盖原文件）后再载入。
+> 这里的 `manifest.json` 已经是**火狐专用**版本，直接载入即可，无需改名。
 
 ## Chrome / Edge 安装步骤
+
+> 本目录的 `manifest.json` 是火狐版本，Chrome 不认 `background.scripts`。
+> 用 Chrome/Edge 时请先把 `manifest.chrome.json` 复制成 `manifest.json`（覆盖原文件），
+> 再按下面步骤加载。
 
 1. 地址栏打开 `chrome://extensions`（Edge 为 `edge://extensions`）。
 2. 打开右上角的「开发者模式」。
@@ -52,7 +55,7 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| `manifest.json` | 主清单（同时声明 Chrome 的 `service_worker` 与 Firefox 的 `scripts`）。 |
-| `manifest.firefox.json` | 仅火狐的备用清单（只声明 `scripts`）。 |
+| `manifest.json` | 火狐清单（`background.scripts`）。 |
+| `manifest.chrome.json` | Chrome/Edge 清单（`background.service_worker`）；用前覆盖 `manifest.json`。 |
 | `background.js` | 取当前页 URL 与 Cookie，POST 给本地工具，更新徽标。 |
 | `popup.html` / `popup.js` | 图标弹窗：显示最近一次结果与端口设置。 |
