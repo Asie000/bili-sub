@@ -260,11 +260,24 @@ func (c *Client) CheckLogin(ctx context.Context) (bool, error) {
 
 // CheckLoginAt is CheckLogin against an explicit nav endpoint, for tests.
 func (c *Client) CheckLoginAt(ctx context.Context, navURL string) (bool, error) {
+	ok, _, err := c.NavStatusAt(ctx, navURL)
+	return ok, err
+}
+
+// NavStatus is CheckLogin plus the signed-in account name, so the UI can show
+// who is logged in instead of a bare boolean.
+func (c *Client) NavStatus(ctx context.Context) (bool, string, error) {
+	return c.NavStatusAt(ctx, DefaultNavURL)
+}
+
+// NavStatusAt is NavStatus against an explicit nav endpoint, for tests.
+func (c *Client) NavStatusAt(ctx context.Context, navURL string) (bool, string, error) {
 	var data struct {
-		IsLogin bool `json:"isLogin"`
+		IsLogin bool   `json:"isLogin"`
+		Uname   string `json:"uname"`
 	}
 	if err := c.Get(ctx, navURL, nil, &data); err != nil {
-		return false, err
+		return false, "", err
 	}
-	return data.IsLogin, nil
+	return data.IsLogin, data.Uname, nil
 }

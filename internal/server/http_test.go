@@ -66,8 +66,8 @@ func TestVideosEndpointEmptyStoreIsEmptyArray(t *testing.T) {
 	if got := rec.Body.String(); got != "[]" {
 		t.Fatalf("body = %q, want exactly [] (not null)", got)
 	}
-	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
-		t.Errorf("Content-Type = %q, want application/json", ct)
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want application/json; charset=utf-8", ct)
 	}
 }
 
@@ -444,5 +444,76 @@ func TestEmbeddedUIExposesExportFormats(t *testing.T) {
 		if !strings.Contains(index, `value="`+format+`"`) {
 			t.Errorf("index.html offers no %q export checkbox", format)
 		}
+	}
+}
+
+func TestLoginStatusEndpoint(t *testing.T) {
+	s := newTestServer(t, Options{
+		LoginStatus: func(context.Context) (LoginState, error) {
+			return LoginState{LoggedIn: true, Uname: "测试用户"}, nil
+		},
+	})
+	rec := serve(t, s, http.MethodGet, "/api/login/status", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rec.Code)
+	}
+	var got LoginState
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if !got.LoggedIn || got.Uname != "测试用户" {
+		t.Fatalf("got %+v, want logged in as 测试用户", got)
+	}
+}
+
+func TestLoginStatusFailureReportsLoggedOutWithoutLeakingTheError(t *testing.T) {
+	s := newTestServer(t, Options{
+		LoginStatus: func(context.Context) (LoginState, error) {
+			return LoginState{}, fmt.Errorf("network down for 1234567890")
+		},
+	})
+	rec := serve(t, s, http.MethodGet, "/api/login/status", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "network down") {
+		t.Fatalf("internal error leaked to the client: %s", rec.Body.String())
+	}
+	var got LoginState
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.LoggedIn {
+		t.Fatalf("got %+v, want not logged in", got)
+	}
+}
+
+func TestCORSPreflightFromBilibiliIsAllowed(t *testing.T) {
+	s := newTestServer(t, Options{
+		Probe: func(context.Context, string) (ProbeSummary, error) { return ProbeSummary{}, nil },
+	})
+	req := httptest.NewRequest(http.MethodOptions, "/api/probe", nil)
+	req.Header.Set("Origin", "https://www.bilibili.com")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("code = %d, want 204", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "https://www.bilibili.com" {
+		t.Fatalf("allow-origin = %q, want the bilibili origin", got)
+	}
+}
+
+func TestCORSRejectsForeignOrigin(t *testing.T) {
+	s := newTestServer(t, Options{})
+	req := httptest.NewRequest(http.MethodOptions, "/api/probe", nil)
+	req.Header.Set("Origin", "https://evil.example.com")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("foreign origin was granted CORS: %q", got)
 	}
 }

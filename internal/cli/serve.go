@@ -114,9 +114,26 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 			defer r.opMu.Unlock()
 			return r.export(io.Discard, io.Discard, formats)
 		},
-		Login:   r.saveSessdata,
-		QRLogin: r.qrLogin(hub),
+		Login:       r.saveSessdata,
+		LoginStatus: r.loginStatus,
+		QRLogin:     r.qrLogin(hub),
 	}
+}
+
+// loginStatus reports whether the stored SESSDATA is still accepted and the
+// account name, so a refresh can restore the header instead of showing nothing.
+func (r *runtime) loginStatus(ctx context.Context) (server.LoginState, error) {
+	client, err := r.client()
+	if err != nil {
+		return server.LoginState{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, loginCheckTimeout)
+	defer cancel()
+	ok, uname, err := client.NavStatus(ctx)
+	if err != nil {
+		return server.LoginState{}, err
+	}
+	return server.LoginState{LoggedIn: ok, Uname: uname}, nil
 }
 
 // saveSessdata persists a SESSDATA and verifies it before reporting success, so

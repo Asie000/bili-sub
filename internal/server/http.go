@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -29,17 +30,24 @@ type DownloadSummary struct {
 	Failed  int `json:"failed"`
 }
 
+// LoginState is what GET /api/login/status reports.
+type LoginState struct {
+	LoggedIn bool   `json:"logged_in"`
+	Uname    string `json:"uname,omitempty"`
+}
+
 // Options wires the server to the store and the long-running operations. Every
 // seam is optional: a nil seam makes its endpoint answer 501 instead of
 // panicking. Hub may be nil, in which case the server creates one.
 type Options struct {
-	Store    *store.Store
-	Probe    func(ctx context.Context, url string) (ProbeSummary, error)
-	Download func(ctx context.Context, lang string, transcribe bool) (DownloadSummary, error)
-	Export   func(ctx context.Context, formats []string) (string, error)
-	Login    func(sessdata string) error
-	QRLogin  func(ctx context.Context) (string, error)
-	Hub      *Hub
+	Store       *store.Store
+	Probe       func(ctx context.Context, url string) (ProbeSummary, error)
+	Download    func(ctx context.Context, lang string, transcribe bool) (DownloadSummary, error)
+	Export      func(ctx context.Context, formats []string) (string, error)
+	Login       func(sessdata string) error
+	LoginStatus func(ctx context.Context) (LoginState, error)
+	QRLogin     func(ctx context.Context) (string, error)
+	Hub         *Hub
 }
 
 // Server serves the JSON API, the SSE stream and the embedded UI.
@@ -71,7 +79,8 @@ func (s *Server) eventHub() *Hub {
 }
 
 // Handler builds the route table. Method-specific patterns mean a wrong method
-// gets a 405 from net/http's mux.
+// gets a 405 from net/http's mux. The whole table is wrapped in the CORS
+// middleware so the bookmarklet, which runs on a bilibili page, can POST here.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /", staticHandler())
@@ -81,9 +90,50 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/download", s.handleDownload)
 	mux.HandleFunc("POST /api/export", s.handleExport)
 	mux.HandleFunc("POST /api/login/sessdata", s.handleSessdata)
+	mux.HandleFunc("GET /api/login/status", s.handleLoginStatus)
 	mux.HandleFunc("GET /api/login/qrcode", s.handleQRCode)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
-	return mux
+	return withCORS(mux)
+}
+
+// allowedCORSOrigin reports whether an Origin may call this API from a browser
+// page. The bookmarklet runs inside a bilibili page, so bilibili hosts (plus
+// localhost) are allowed. A wildcard would let any website drive this local
+// tool, so it is deliberately not used.
+func allowedCORSOrigin(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return true
+	}
+	return host == "bilibili.com" || strings.HasSuffix(host, ".bilibili.com")
+}
+
+// withCORS answers preflight requests and tags allowed origins. Requests with a
+// disallowed origin still run (same-origin/curl callers send no Origin) but get
+// no CORS grant, so the browser blocks the cross-site read.
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); allowedCORSOrigin(origin) {
+			h := w.Header()
+			h.Set("Access-Control-Allow-Origin", origin)
+			h.Add("Vary", "Origin")
+			h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			h.Set("Access-Control-Allow-Headers", "Content-Type")
+			h.Set("Access-Control-Max-Age", "600")
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // handleVideos returns every stored video. store.Video has no JSON tags, so the
@@ -221,6 +271,23 @@ func (s *Server) handleSessdata(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+// handleLoginStatus reports whether the stored SESSDATA is still accepted and,
+// when it is, the signed-in account name. A failed check (network hiccup, bad
+// cookie) is reported as "not logged in" rather than a 5xx: the page only needs
+// the boolean.
+func (s *Server) handleLoginStatus(w http.ResponseWriter, r *http.Request) {
+	if s.opts.LoginStatus == nil {
+		writeError(w, http.StatusNotImplemented, "登录状态查询未启用")
+		return
+	}
+	state, err := s.opts.LoginStatus(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusOK, LoginState{})
+		return
+	}
+	writeJSON(w, http.StatusOK, state)
+}
+
 func (s *Server) handleQRCode(w http.ResponseWriter, r *http.Request) {
 	if s.opts.QRLogin == nil {
 		writeError(w, http.StatusNotImplemented, "扫码登录未启用")
@@ -304,12 +371,12 @@ func decodeJSON(r *http.Request, dst any) error {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	body, err := json.Marshal(v)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"error":"响应序列化失败"}`))
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
 }

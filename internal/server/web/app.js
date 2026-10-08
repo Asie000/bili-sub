@@ -197,10 +197,73 @@ async function qrLogin() {
     $("qr-img").src = result.png;
     status.textContent = "请用哔哩哔哩 App 扫码，并在手机上确认登录";
     log("二维码已生成，请用哔哩哔哩 App 扫描。");
+    startQRStatusPolling();
   } catch (err) {
     area.hidden = true;
     log(`获取二维码失败：${err.message}`);
   }
+}
+
+// The QR flow finishes in a background poll on the server, so the page learns
+// about it two ways: the SSE `login` event, and this poll of
+// /api/login/status. The poll also makes the state survive a page refresh.
+let qrPollTimer = null;
+
+function startQRStatusPolling() {
+  stopQRStatusPolling();
+  qrPollTimer = setInterval(loadLoginStatus, 2000);
+}
+
+function stopQRStatusPolling() {
+  if (qrPollTimer) {
+    clearInterval(qrPollTimer);
+    qrPollTimer = null;
+  }
+}
+
+async function loadLoginStatus() {
+  try {
+    const state = await api("/api/login/status");
+    applyLoginStatus(state);
+  } catch (err) {
+    // The status endpoint is optional; the rest of the page still works.
+  }
+}
+
+function applyLoginStatus(state) {
+  const el = $("login-status");
+  if (state && state.logged_in) {
+    el.textContent = `登录状态：已登录${state.uname ? `（${state.uname}）` : ""}`;
+    el.classList.add("ok");
+    stopQRStatusPolling();
+    $("qr-area").hidden = true;
+    return;
+  }
+  el.textContent = "登录状态：未登录";
+  el.classList.remove("ok");
+}
+
+// buildBookmarklet turns the current origin into a javascript: bookmark. Clicking
+// it on a bilibili page POSTs that page's URL to this tool. The endpoint allows
+// exactly bilibili origins through CORS, so no extension is needed.
+function buildBookmarklet() {
+  const origin = location.origin;
+  const code =
+    "(function(){var u=location.href;" +
+    "fetch(" + JSON.stringify(origin + "/api/probe") + ",{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:u})})" +
+    ".then(function(r){return r.json()})" +
+    ".then(function(d){if(d&&d.error){alert('bili-sub 探测失败：'+d.error)}else{alert('bili-sub 已探测：共 '+d.probed+'，可下载 '+d.downloadable+'，无字幕 '+d.no_subtitle+'，失败 '+d.failed)}})" +
+    ".catch(function(e){alert('bili-sub 请求失败：'+e)});})()";
+  const link = $("bookmarklet");
+  if (!link) {
+    return;
+  }
+  link.href = "javascript:" + encodeURIComponent(code);
+  link.addEventListener("click", (e) => {
+    // On this page a click would probe the tool's own URL; ask for a drag.
+    e.preventDefault();
+    log("请把「拖我到书签栏」拖进浏览器书签栏，然后在 B站 页面点击它。");
+  });
 }
 
 function clearTable() {
@@ -238,15 +301,18 @@ function connectEvents() {
         const ok = !!(ev.data && ev.data.ok);
         const status = $("qr-status");
         if (ok) {
-          $("login-status").textContent = "登录状态：已保存 SESSDATA";
           if (status) {
             status.textContent = "登录成功，已保存 SESSDATA。";
           }
+          applyLoginStatus({ logged_in: true });
+          loadLoginStatus();
+          log("扫码登录成功。");
         } else if (ev.data && ev.data.error) {
-          $("login-status").textContent = "登录状态：未登录";
           if (status) {
             status.textContent = `登录失败：${ev.data.error}`;
           }
+          stopQRStatusPolling();
+          log(`扫码登录失败：${ev.data.error}`);
         }
       }
       if (ev.type === "probe" || ev.type === "download") {
@@ -275,3 +341,5 @@ $("qr-login").addEventListener("click", qrLogin);
 
 loadVideos();
 connectEvents();
+loadLoginStatus();
+buildBookmarklet();
