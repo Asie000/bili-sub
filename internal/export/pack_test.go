@@ -42,22 +42,18 @@ func TestPack(t *testing.T) {
 		t.Fatalf("entries=%d", len(r.File))
 	}
 
-	// 每个 entry 必须嵌在 归档基名/作者 两层目录下，文件名必须等于
-	// SanitizeFilename 的结果加格式后缀。
+	// 每个 entry 必须嵌在归档基名这一层下，文件名必须等于
+	// SanitizeSubtitleName 的结果（UP主前缀 + 标题 + [bvid]）加格式后缀。
 	got := make(map[string]bool, len(r.File))
 	for _, f := range r.File {
 		got[f.Name] = true
-		parts := strings.SplitN(f.Name, "/", 3)
-		if len(parts) != 3 || parts[0] != strings.TrimSuffix(wantPrefix, "/") {
-			t.Errorf("entry %q is not nested under %q", f.Name, wantPrefix)
-		}
 	}
 	for key, d := range docs {
-		folder := util.SanitizeDirName(d.Author)
+		stem := util.SanitizeSubtitleName(d.Author, d.Title, d.Bvid)
 		for _, format := range []string{"srt", "txt"} {
-			want := wantPrefix + folder + "/" + util.SanitizeFilename(d.Title, d.Bvid) + "." + format
+			want := wantPrefix + stem + "." + format
 			if !got[want] {
-				t.Errorf("missing entry %q (doc key %q)", want, key)
+				t.Errorf("missing entry %q (doc key %q); got %v", want, key, entryNames(r.File))
 			}
 		}
 	}
@@ -75,7 +71,7 @@ func TestPackRejectsDuplicateEntryName(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Pack accepted duplicate entries, zip=%s", z)
 	}
-	stem := util.SanitizeFilename("同名", "BV1")
+	stem := util.SanitizeSubtitleName("同一UP", "同名", "BV1")
 	if !strings.Contains(err.Error(), stem) {
 		t.Fatalf("error does not name the duplicate stem %q: %v", stem, err)
 	}
@@ -91,9 +87,9 @@ func TestPackRejectsDuplicateEntryName(t *testing.T) {
 	}
 }
 
-// TestPackDifferentAuthorsNoCollision pins the folder level's reason to exist:
+// TestPackDifferentAuthorsNoCollision pins the author prefix's reason to exist:
 // two documents sharing a title and bvid but belonging to different authors now
-// get distinct entries instead of being rejected as duplicates.
+// get distinct flat entries instead of being rejected as duplicates.
 func TestPackDifferentAuthorsNoCollision(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 10, 8, 0, 0, 0, 0, time.Local)
@@ -113,10 +109,9 @@ func TestPackDifferentAuthorsNoCollision(t *testing.T) {
 	if len(r.File) != 2 {
 		t.Fatalf("entries = %d, want 2 (one per author)", len(r.File))
 	}
-	stem := util.SanitizeFilename("同名", "BV1")
 	base := "20261008-2/"
-	for _, folder := range []string{"UP甲", "UP乙"} {
-		want := base + folder + "/" + stem + ".srt"
+	for _, author := range []string{"UP甲", "UP乙"} {
+		want := base + util.SanitizeSubtitleName(author, "同名", "BV1") + ".srt"
 		found := false
 		for _, f := range r.File {
 			if f.Name == want {

@@ -39,14 +39,24 @@ func SanitizeFilename(title, bvid string) string {
 	return s + " [" + bvid + "]"
 }
 
-// SanitizeDirName cleans an author name for use as a single zip folder. It
-// shares SanitizeFilename's illegal-character cleaning but appends no bvid
-// suffix, falls back to 未知UP主 when nothing is left, and truncates to 80 runes
-// so one author folder cannot dominate the entry path.
-func SanitizeDirName(name string) string {
-	s := sanitizeText(name, 80)
+// SanitizeSubtitleName builds the flat filename stem shared by the export zip
+// and the on-disk download. It prefixes the video's UP主 so a flat archive still
+// shows whose video each file is: the combined "author - title" is cleaned like
+// SanitizeFilename and truncated to 100 runes, then the [bvid] tag is appended
+// after the truncation so the video id always survives. An empty author falls
+// back to the bare title, and an empty result to "untitled"; when bvid is empty
+// the bracket suffix is omitted entirely.
+func SanitizeSubtitleName(author, title, bvid string) string {
+	combined := title
+	if strings.TrimSpace(author) != "" {
+		combined = author + " - " + title
+	}
+	s := sanitizeText(combined, 100)
 	if s == "" {
-		s = "未知UP主"
+		s = "untitled"
+	}
+	if bvid != "" {
+		s += " [" + bvid + "]"
 	}
 	return s
 }

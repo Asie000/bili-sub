@@ -124,7 +124,7 @@ func (r *runtime) export(out, warn io.Writer, formats []string, includeExported 
 		}
 		// The IR is the subtitle's own record; a transcript written before the
 		// author was stored can carry an empty Author, so fall back to the
-		// video row's author to keep the zip's per-UP folder meaningful.
+		// video row's author to keep the UP主-prefixed file name meaningful.
 		if doc.Author == "" {
 			doc.Author = v.Author
 		}

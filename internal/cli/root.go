@@ -191,10 +191,10 @@ func writeVideosTable(w io.Writer, videos []store.Video, stateFor, langFor func(
 
 // pageStem is the filename stem shared by every rendered format of one video.
 // It must match the .srt name chosen by pipeline.Downloader.FetchSubtitle: the
-// _P{n} suffix only appears for multi-page videos, so pages of one video never
-// collide.
+// UP主 prefix plus title is cleaned and the _P{n} suffix only appears for
+// multi-page videos, so pages of one video never collide.
 func pageStem(v store.Video) string {
-	base := util.SanitizeFilename(v.Title, v.Bvid)
+	base := util.SanitizeSubtitleName(v.Author, v.Title, v.Bvid)
 	if v.PageIndex > 1 {
 		base += "_P" + strconv.Itoa(v.PageIndex)
 	}

@@ -199,11 +199,11 @@ func TestExportWritesZipFromStoredTranscript(t *testing.T) {
 	if len(zr.File) != 2 {
 		t.Fatalf("zip entries = %d, want 2 (srt+txt)", len(zr.File))
 	}
-	// Every entry nests under the archive base and the author's folder.
-	stem := util.SanitizeFilename("测试标题", "BV1uv411q7Mv")
+	// Every entry nests under the archive base, and the flat file name carries
+	// the UP主 prefix.
 	base := strings.TrimSuffix(filepath.Base(zips[0]), ".zip") + "/"
+	want := base + util.SanitizeSubtitleName("测试UP主", "测试标题", "BV1uv411q7Mv")
 	for _, f := range zr.File {
-		want := base + util.SanitizeDirName("测试UP主") + "/" + stem
 		if !strings.HasPrefix(f.Name, want) {
 			t.Errorf("entry %q, want it nested under %q", f.Name, want)
 		}
@@ -398,16 +398,15 @@ func TestWriteSubtitleFormats(t *testing.T) {
 		t.Fatalf("writeSubtitleFormats: %v", err)
 	}
 
-	stem := "标题 [BV1uv411q7Mv]_P2"
+	stem := "某UP - 标题 [BV1uv411q7Mv]_P2"
 	if pageStem(v) != stem {
 		t.Fatalf("pageStem = %q, want %q", pageStem(v), stem)
 	}
-	subDir := filepath.Join(dir, util.SanitizeDirName(v.Author))
-	if _, err := os.Stat(filepath.Join(subDir, stem+".srt")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, stem+".srt")); !os.IsNotExist(err) {
 		t.Errorf(".srt must be left to FetchSubtitle, stat err = %v", err)
 	}
 	for _, format := range []string{"txt", "json"} {
-		if _, err := os.Stat(filepath.Join(subDir, stem+"."+format)); err != nil {
+		if _, err := os.Stat(filepath.Join(dir, stem+"."+format)); err != nil {
 			t.Errorf("%s.%s missing: %v", stem, format, err)
 		}
 	}
@@ -780,8 +779,8 @@ func TestExportPackagesOnlyNotYetExported(t *testing.T) {
 	}
 	base := strings.TrimSuffix(filepath.Base(zips[0]), ".zip") + "/"
 	wantEntries := map[string]bool{
-		base + util.SanitizeDirName("UP甲") + "/" + util.SanitizeFilename("源一", "BV1aaaa1111a") + ".srt": true,
-		base + util.SanitizeDirName("UP乙") + "/" + util.SanitizeFilename("源二", "BV1bbbb2222b") + ".srt": true,
+		base + util.SanitizeSubtitleName("UP甲", "源一", "BV1aaaa1111a") + ".srt": true,
+		base + util.SanitizeSubtitleName("UP乙", "源二", "BV1bbbb2222b") + ".srt": true,
 	}
 	for _, f := range zr.File {
 		if !wantEntries[f.Name] {

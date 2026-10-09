@@ -103,19 +103,18 @@ func (d *Downloader) FetchSubtitle(ctx context.Context, v store.Video, lang stri
 	if err != nil {
 		return nil, err
 	}
-	// The on-disk layout mirrors the export zip: one folder per author, then the
-	// per-video stem, so a user's files and archives line up.
-	subDir := filepath.Join(d.OutputDir, util.SanitizeDirName(v.Author))
-	if err := os.MkdirAll(subDir, 0o755); err != nil {
+	// The on-disk layout mirrors the export zip: one flat file per video, its
+	// name prefixed with the UP主 so a user's files and archives line up.
+	if err := os.MkdirAll(d.OutputDir, 0o755); err != nil {
 		return nil, err
 	}
 	// Only multi-page videos get the _P{n} suffix, so pages of one video do not
-	// overwrite each other's .srt.
-	base := util.SanitizeFilename(v.Title, v.Bvid)
+	// overwrite each other's .srt; it is appended after the bvid bracket.
+	base := util.SanitizeSubtitleName(v.Author, v.Title, v.Bvid)
 	if v.PageIndex > 1 {
 		base += "_P" + strconv.Itoa(v.PageIndex)
 	}
-	srtPath := filepath.Join(subDir, base+".srt")
+	srtPath := filepath.Join(d.OutputDir, base+".srt")
 	if err := os.WriteFile(srtPath, srt, 0o644); err != nil {
 		return nil, err
 	}
