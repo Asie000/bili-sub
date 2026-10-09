@@ -91,7 +91,8 @@ func (r *runtime) export(out, warn io.Writer, formats []string, includeExported 
 	}
 	if len(videos) == 0 {
 		emit(0, 0)
-		return "", errors.New("export: 没有尚未导出的字幕，先运行 download（如需重复导出请用 --include-exported）")
+		fmt.Fprintln(out, "没有尚未导出的字幕（如需重新导出，请勾选「包含已导出的」或用 --include-exported）。")
+		return "", nil
 	}
 	// total is every row being packaged; a row whose IR is missing or corrupt is
 	// still counted, so the final tick always reports the same total.

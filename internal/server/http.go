@@ -393,6 +393,11 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if zipPath == "" {
+		// Nothing pending: a normal outcome, not an error.
+		writeJSON(w, http.StatusOK, map[string]string{"zip": "", "message": "没有尚未导出的字幕（可勾选「包含已导出的」后重试）"})
+		return
+	}
 	s.eventHub().Broadcast(Event{Type: "export", Data: map[string]string{"zip": zipPath}})
 	writeJSON(w, http.StatusOK, map[string]string{"zip": zipPath})
 }

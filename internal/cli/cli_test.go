@@ -805,9 +805,17 @@ func TestExportPackagesOnlyNotYetExported(t *testing.T) {
 		t.Fatalf("close store: %v", err)
 	}
 
-	// A second default export now has nothing left to package.
-	if err := execute("export", "--format", "srt"); err == nil {
-		t.Fatal("second default export: error = nil, want a nothing-to-export error")
+	// A second default export now has nothing left to package: it is a friendly
+	// no-op that creates no new archive.
+	if err := execute("export", "--format", "srt"); err != nil {
+		t.Fatalf("second default export: %v, want a friendly no-op", err)
+	}
+	stillZips, err := filepath.Glob(filepath.Join(dir, "exports", "*.zip"))
+	if err != nil {
+		t.Fatalf("glob exports: %v", err)
+	}
+	if len(stillZips) != 1 {
+		t.Fatalf("zips after the no-op export = %v, want still one", stillZips)
 	}
 
 	// --include-exported re-packages the already-exported rows too.

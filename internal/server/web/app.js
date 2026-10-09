@@ -277,6 +277,12 @@ async function exportZip() {
   beginProgress("export");
   try {
     const result = await post("/api/export", { formats, include_exported: includeExported });
+    if (!result.zip) {
+      log(result.message || "没有尚未导出的字幕。");
+      $("progress-label").textContent = "无新内容";
+      $("progress-fill").style.width = "0%";
+      return;
+    }
     log(`导出完成：${result.zip}`);
     if (!includeExported) {
       log("本次导出的视频已标记为「已导出」，下次默认不再打包；如需重新导出请勾选「包含已导出的」。");
