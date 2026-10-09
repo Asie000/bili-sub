@@ -156,11 +156,9 @@ function renderTable(items) {
 
 async function loadVideos() {
   try {
+    // The list accumulates every probed source on purpose: this is a batch
+    // collector, so a new probe appends instead of replacing. 清空数据 resets it.
     const params = new URLSearchParams();
-    const showAll = $("show-all") && $("show-all").checked;
-    if (!showAll && state.currentSource) {
-      params.set("source", state.currentSource);
-    }
     params.set("offset", String(pageOffset));
     params.set("limit", String(PAGE_SIZE));
     const data = await api(`/api/videos?${params.toString()}`);
@@ -224,7 +222,6 @@ async function probe() {
       kind: $("kind").value,
       force: $("force-probe").checked,
     });
-    state.currentSource = summary.source || "";
     pageOffset = 0;
     if (summary.probed === 0) {
       log(`探测完成：该来源没有视频（来源 ${summary.kind || "?"} ${summary.source || ""}）。`);
@@ -248,7 +245,6 @@ async function download() {
     const summary = await post("/api/download", {
       lang: $("lang").value,
       transcribe: $("transcribe").checked,
-      source: state.currentSource || "",
     });
     log(`获取字幕完成：成功 ${summary.fetched}，失败 ${summary.failed}`);
     await loadVideos();
@@ -530,10 +526,6 @@ $("page-next").addEventListener("click", () => {
 });
 $("save-sessdata").addEventListener("click", saveSessdata);
 $("qr-login").addEventListener("click", qrLogin);
-$("show-all").addEventListener("change", () => {
-  pageOffset = 0;
-  loadVideos();
-});
 document.querySelectorAll(".export-format").forEach((box) =>
   box.addEventListener("change", updateExportHint));
 updateExportHint();
