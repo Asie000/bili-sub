@@ -3,7 +3,6 @@ package export
 import (
 	"archive/zip"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,8 +16,8 @@ func TestPack(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 10, 8, 0, 0, 0, 0, time.Local)
 	docs := map[string]*ir.Document{
-		"BV1": {Bvid: "BV1", Title: "视频一", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "a"}}},
-		"BV2": {Bvid: "BV2", Title: "视频二", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "b"}}},
+		"BV1": {Bvid: "BV1", Title: "视频一", Author: "UP甲", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "a"}}},
+		"BV2": {Bvid: "BV2", Title: "视频二", Author: "UP乙", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "b"}}},
 	}
 	z, err := Pack(dir, now, docs, []string{"srt", "txt"})
 	if err != nil {
@@ -43,18 +42,20 @@ func TestPack(t *testing.T) {
 		t.Fatalf("entries=%d", len(r.File))
 	}
 
-	// 每个 entry 的目录层必须等于归档基名，文件名必须等于 SanitizeFilename 的结果加格式后缀。
+	// 每个 entry 必须嵌在 归档基名/作者 两层目录下，文件名必须等于
+	// SanitizeFilename 的结果加格式后缀。
 	got := make(map[string]bool, len(r.File))
 	for _, f := range r.File {
 		got[f.Name] = true
-		folder := path.Dir(f.Name) + "/"
-		if folder != wantPrefix {
-			t.Errorf("entry %q folder = %q, want %q", f.Name, folder, wantPrefix)
+		parts := strings.SplitN(f.Name, "/", 3)
+		if len(parts) != 3 || parts[0] != strings.TrimSuffix(wantPrefix, "/") {
+			t.Errorf("entry %q is not nested under %q", f.Name, wantPrefix)
 		}
 	}
 	for key, d := range docs {
+		folder := util.SanitizeDirName(d.Author)
 		for _, format := range []string{"srt", "txt"} {
-			want := wantPrefix + util.SanitizeFilename(d.Title, d.Bvid) + "." + format
+			want := wantPrefix + folder + "/" + util.SanitizeFilename(d.Title, d.Bvid) + "." + format
 			if !got[want] {
 				t.Errorf("missing entry %q (doc key %q)", want, key)
 			}
@@ -65,10 +66,10 @@ func TestPack(t *testing.T) {
 func TestPackRejectsDuplicateEntryName(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 10, 8, 0, 0, 0, 0, time.Local)
-	// 两个 map key 不同，但 Title+Bvid 相同 => 同一个 entry 名。
+	// 两个 map key 不同，但 Author+Title+Bvid 相同 => 同一个 entry 名。
 	docs := map[string]*ir.Document{
-		"first":  {Bvid: "BV1", Title: "同名", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "a"}}},
-		"second": {Bvid: "BV1", Title: "同名", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "b"}}},
+		"first":  {Bvid: "BV1", Title: "同名", Author: "同一UP", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "a"}}},
+		"second": {Bvid: "BV1", Title: "同名", Author: "同一UP", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "b"}}},
 	}
 	z, err := Pack(dir, now, docs, []string{"srt"})
 	if err == nil {
@@ -88,6 +89,53 @@ func TestPackRejectsDuplicateEntryName(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("left %d file(s) behind on failure: %v", len(entries), entries)
 	}
+}
+
+// TestPackDifferentAuthorsNoCollision pins the folder level's reason to exist:
+// two documents sharing a title and bvid but belonging to different authors now
+// get distinct entries instead of being rejected as duplicates.
+func TestPackDifferentAuthorsNoCollision(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 10, 8, 0, 0, 0, 0, time.Local)
+	docs := map[string]*ir.Document{
+		"first":  {Bvid: "BV1", Title: "同名", Author: "UP甲", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "a"}}},
+		"second": {Bvid: "BV1", Title: "同名", Author: "UP乙", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "b"}}},
+	}
+	z, err := Pack(dir, now, docs, []string{"srt"})
+	if err != nil {
+		t.Fatalf("Pack: %v", err)
+	}
+	r, err := zip.OpenReader(z)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if len(r.File) != 2 {
+		t.Fatalf("entries = %d, want 2 (one per author)", len(r.File))
+	}
+	stem := util.SanitizeFilename("同名", "BV1")
+	base := "20261008-2/"
+	for _, folder := range []string{"UP甲", "UP乙"} {
+		want := base + folder + "/" + stem + ".srt"
+		found := false
+		for _, f := range r.File {
+			if f.Name == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("missing entry %q; got %v", want, entryNames(r.File))
+		}
+	}
+}
+
+// entryNames lists a zip's entry names for failure messages.
+func entryNames(files []*zip.File) []string {
+	names := make([]string, 0, len(files))
+	for _, f := range files {
+		names = append(names, f.Name)
+	}
+	return names
 }
 
 func TestPackRejectsNilDocument(t *testing.T) {

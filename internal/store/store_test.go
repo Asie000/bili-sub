@@ -51,6 +51,50 @@ func TestSetState(t *testing.T) {
 	}
 }
 
+func TestMarkExported(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	id1, _ := s.UpsertVideo(&Video{Bvid: "BV1", Cid: 1, State: StateFetched})
+	id2, _ := s.UpsertVideo(&Video{Bvid: "BV2", Cid: 1, State: StateFetched})
+	id3, _ := s.UpsertVideo(&Video{Bvid: "BV3", Cid: 1, State: StateTranscribed})
+
+	if err := s.MarkExported([]int64{id1, id2}); err != nil {
+		t.Fatalf("MarkExported: %v", err)
+	}
+	exported, err := s.ListVideos(StateExported)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exported) != 2 {
+		t.Fatalf("exported rows = %d, want 2 (%+v)", len(exported), exported)
+	}
+	for _, v := range exported {
+		if v.ID != id1 && v.ID != id2 {
+			t.Errorf("unexpected exported row %+v", v)
+		}
+	}
+	// The id that was not passed keeps its old state.
+	still, err := s.ListVideos(StateTranscribed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(still) != 1 || still[0].ID != id3 {
+		t.Fatalf("transcribed rows = %+v, want only %d", still, id3)
+	}
+
+	// An empty slice is a no-op that must not error or touch any row.
+	if err := s.MarkExported(nil); err != nil {
+		t.Fatalf("MarkExported(nil): %v", err)
+	}
+	if n, err := s.CountVideos(StateExported, ""); err != nil || n != 2 {
+		t.Fatalf("CountVideos after no-op = %d, %v; want 2, nil", n, err)
+	}
+}
+
 func TestFileConcurrentReadWrite(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "store.db"))
 	if err != nil {

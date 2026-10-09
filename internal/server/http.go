@@ -77,7 +77,7 @@ type Options struct {
 	Store       *store.Store
 	Probe       func(ctx context.Context, url, kind string, force bool, onProgress func(Progress)) (ProbeSummary, error)
 	Download    func(ctx context.Context, lang string, transcribe bool, source string, onProgress func(Progress)) (DownloadSummary, error)
-	Export      func(ctx context.Context, formats []string, source string, onProgress func(Progress)) (string, error)
+	Export      func(ctx context.Context, formats []string, includeExported bool, onProgress func(Progress)) (string, error)
 	Login       func(sessdata, cookie string) error
 	LoginStatus func(ctx context.Context) (LoginState, error)
 	QRLogin     func(ctx context.Context) (string, error)
@@ -374,8 +374,8 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Formats []string `json:"formats"`
-		Source  string   `json:"source"`
+		Formats         []string `json:"formats"`
+		IncludeExported bool     `json:"include_exported"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
@@ -388,7 +388,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	onProgress := func(p Progress) {
 		s.eventHub().Broadcast(Event{Type: "progress", Data: p})
 	}
-	zipPath, err := s.opts.Export(r.Context(), req.Formats, req.Source, onProgress)
+	zipPath, err := s.opts.Export(r.Context(), req.Formats, req.IncludeExported, onProgress)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

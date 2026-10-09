@@ -165,6 +165,31 @@ func (s *Store) SetState(id int64, state, lang string) error {
 	return err
 }
 
+// MarkExported sets state='exported' for every given id in one transaction, so a
+// packed archive's videos change state together. An empty slice is a no-op, and
+// marking an already-exported id just rewrites the same value.
+func (s *Store) MarkExported(ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`UPDATE videos SET state=? WHERE id=?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, id := range ids {
+		if _, err := stmt.Exec(StateExported, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1

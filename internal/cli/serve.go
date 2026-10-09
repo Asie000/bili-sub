@@ -120,7 +120,7 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 			}
 			return server.DownloadSummary{Fetched: stats.Fetched, Failed: stats.Failed}, nil
 		},
-		Export: func(_ context.Context, formats []string, source string, onProgress func(server.Progress)) (string, error) {
+		Export: func(_ context.Context, formats []string, includeExported bool, onProgress func(server.Progress)) (string, error) {
 			if !r.opMu.TryLock() {
 				return "", errOperationBusy
 			}
@@ -131,7 +131,7 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 					onProgress(server.Progress{Op: "export", Done: done, Total: total})
 				}
 			}
-			return r.export(io.Discard, io.Discard, formats, source, progress)
+			return r.export(io.Discard, io.Discard, formats, includeExported, progress)
 		},
 		Login:       r.saveSession,
 		LoginStatus: r.loginStatus,

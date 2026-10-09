@@ -272,11 +272,15 @@ async function exportZip() {
     log("请至少选择一种导出格式。");
     return;
   }
-  log(`开始导出（${formats.join(",")}）…`);
+  const includeExported = $("include-exported").checked;
+  log(`开始导出（${formats.join(",")}${includeExported ? "，含已导出" : ""}）…`);
   beginProgress("export");
   try {
-    const result = await post("/api/export", { formats, source: state.currentSource || "" });
+    const result = await post("/api/export", { formats, include_exported: includeExported });
     log(`导出完成：${result.zip}`);
+    if (!includeExported) {
+      log("本次导出的视频已标记为「已导出」，下次默认不再打包；如需重新导出请勾选「包含已导出的」。");
+    }
   } catch (err) {
     showFailure();
     log(`导出失败：${err.message}`);

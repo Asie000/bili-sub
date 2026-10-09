@@ -219,7 +219,7 @@ func TestEndToEndPipelineNoNetwork(t *testing.T) {
 		if v.PageIndex > 1 {
 			stem += "_P" + strconv.Itoa(v.PageIndex)
 		}
-		srtBytes, err := os.ReadFile(filepath.Join(outDir, stem+".srt"))
+		srtBytes, err := os.ReadFile(filepath.Join(outDir, util.SanitizeDirName(v.Author), stem+".srt"))
 		if err != nil {
 			t.Fatalf("%s: read srt: %v", label, err)
 		}
@@ -294,7 +294,7 @@ func TestEndToEndPipelineNoNetwork(t *testing.T) {
 			t.Errorf("zip entry %q is not nested under %q/", name, folder)
 		}
 	}
-	srtEntry := folder + "/" + util.SanitizeFilename(e2eTitle, e2eBvid) + ".srt"
+	srtEntry := folder + "/" + util.SanitizeDirName(e2eAuthor) + "/" + util.SanitizeFilename(e2eTitle, e2eBvid) + ".srt"
 	f, ok := entries[srtEntry]
 	if !ok {
 		t.Fatalf("zip entries=%v want %q", zipNames(entries), srtEntry)

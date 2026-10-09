@@ -451,26 +451,26 @@ func TestDownloadEndpointPassesLangTranscribeAndSource(t *testing.T) {
 	}
 }
 
-func TestExportEndpointReturnsZipAndPassesSource(t *testing.T) {
+func TestExportEndpointReturnsZipAndPassesFlags(t *testing.T) {
 	const zipPath = "data/exports/20261008-2.zip"
-	var gotSource string
+	var gotIncludeExported bool
 	s := newTestServer(t, Options{
-		Export: func(_ context.Context, formats []string, source string, _ func(Progress)) (string, error) {
+		Export: func(_ context.Context, formats []string, includeExported bool, _ func(Progress)) (string, error) {
 			if len(formats) != 1 || formats[0] != "srt" {
 				t.Errorf("formats = %v, want [srt]", formats)
 			}
-			gotSource = source
+			gotIncludeExported = includeExported
 			return zipPath, nil
 		},
 	})
 
-	rec := serve(t, s, http.MethodPost, "/api/export", `{"formats":["srt"],"source":"12345"}`)
+	rec := serve(t, s, http.MethodPost, "/api/export", `{"formats":["srt"],"include_exported":true}`)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
-	if gotSource != "12345" {
-		t.Fatalf("seam received source=%q, want 12345", gotSource)
+	if !gotIncludeExported {
+		t.Fatalf("seam received include_exported=false, want true")
 	}
 	var got map[string]string
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
@@ -483,7 +483,7 @@ func TestExportEndpointReturnsZipAndPassesSource(t *testing.T) {
 
 func TestExportEndpointRejectsEmptyFormats(t *testing.T) {
 	s := newTestServer(t, Options{
-		Export: func(_ context.Context, _ []string, _ string, _ func(Progress)) (string, error) {
+		Export: func(_ context.Context, _ []string, _ bool, _ func(Progress)) (string, error) {
 			t.Error("export seam must not be called with no formats")
 			return "", nil
 		},

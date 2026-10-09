@@ -16,6 +16,7 @@ import (
 	"bilibili-sub/internal/ir"
 	"bilibili-sub/internal/pipeline"
 	"bilibili-sub/internal/store"
+	"bilibili-sub/internal/util"
 )
 
 // transcribeWorkerScript is the faster-whisper worker the CLI asks Python to
@@ -174,8 +175,14 @@ func (r *runtime) download(ctx context.Context, out io.Writer, lang string, form
 
 // writeSubtitleFormats renders the requested formats next to the .srt that
 // FetchSubtitle already wrote. srt is skipped: the downloader owns that file.
+// The files land in the same per-author folder the downloader used, so the
+// on-disk layout matches the export zip.
 func writeSubtitleFormats(dir string, v store.Video, doc *ir.Document, formats []string) error {
 	stem := pageStem(v)
+	subDir := filepath.Join(dir, util.SanitizeDirName(v.Author))
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		return err
+	}
 	for _, format := range formats {
 		if format == export.FormatSRT {
 			continue
@@ -184,7 +191,7 @@ func writeSubtitleFormats(dir string, v store.Video, doc *ir.Document, formats [
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(dir, stem+"."+format), body, 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(subDir, stem+"."+format), body, 0o644); err != nil {
 			return err
 		}
 	}

@@ -20,7 +20,7 @@ import (
 func newExportCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "export",
-		Short: "把已抓取的字幕打包成 zip",
+		Short: "把尚未导出的字幕打包成 zip",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			format, err := cmd.Flags().GetString("format")
@@ -33,7 +33,7 @@ func newExportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			source, err := cmd.Flags().GetString("source")
+			includeExported, err := cmd.Flags().GetBool("include-exported")
 			if err != nil {
 				return err
 			}
@@ -42,31 +42,37 @@ func newExportCmd() *cobra.Command {
 				return err
 			}
 			defer rt.close()
-			_, err = rt.export(cmd.OutOrStdout(), cmd.ErrOrStderr(), formats, source, nil)
+			_, err = rt.export(cmd.OutOrStdout(), cmd.ErrOrStderr(), formats, includeExported, nil)
 			return err
 		},
 	}
 	cmd.Flags().String("format", "srt,txt,json,md", "导出格式，逗号分隔：srt,txt,md,json")
-	cmd.Flags().String("source", "", "只导出该来源（source_key）的字幕，空则导出全部")
+	cmd.Flags().Bool("include-exported", false, "连同已导出的字幕一起打包（默认只导出尚未导出的）")
 	return cmd
 }
 
-// export packs the fetched/transcribed subtitles and returns the zip path (for
-// the HTTP /api/export response). out receives the summary line, warn the
-// per-video skip notices.
-func (r *runtime) export(out, warn io.Writer, formats []string, source string, onProgress func(done, total int)) (string, error) {
+// export packs the not-yet-exported subtitles and returns the zip path (for the
+// HTTP /api/export response). out receives the summary line, warn the per-video
+// skip notices. The exported state records what an earlier run already
+// delivered; includeExported opts back into re-packaging those rows, e.g. to
+// rebuild a lost archive. On success every packaged video is marked exported.
+func (r *runtime) export(out, warn io.Writer, formats []string, includeExported bool, onProgress func(done, total int)) (string, error) {
 	st, err := r.store()
 	if err != nil {
 		return "", err
 	}
 	// transcribed is included so ASR output (Task 15) is exported too, even
-	// though nothing writes that state yet. A video cannot be in both states at
+	// though nothing writes that state yet. A video cannot be in two states at
 	// once, but the merge still dedupes by id so a future overlap cannot pack
 	// one video twice.
+	states := []string{store.StateFetched, store.StateTranscribed}
+	if includeExported {
+		states = append(states, store.StateExported)
+	}
 	var videos []store.Video
 	seen := map[int64]bool{}
-	for _, state := range []string{store.StateFetched, store.StateTranscribed} {
-		list, err := st.ListVideosFiltered(state, source)
+	for _, state := range states {
+		list, err := st.ListVideosFiltered(state, "")
 		if err != nil {
 			return "", err
 		}
@@ -85,7 +91,7 @@ func (r *runtime) export(out, warn io.Writer, formats []string, source string, o
 	}
 	if len(videos) == 0 {
 		emit(0, 0)
-		return "", errors.New("export: 没有已抓取的字幕，先运行 download")
+		return "", errors.New("export: 没有尚未导出的字幕，先运行 download（如需重复导出请用 --include-exported）")
 	}
 	// total is every row being packaged; a row whose IR is missing or corrupt is
 	// still counted, so the final tick always reports the same total.
@@ -94,6 +100,7 @@ func (r *runtime) export(out, warn io.Writer, formats []string, source string, o
 	doneCount := 0
 
 	docs := make(map[string]*ir.Document, len(videos))
+	keyIDs := make(map[string]int64, len(videos))
 	for _, v := range videos {
 		_, _, irJSON, err := st.GetTranscript(v.ID)
 		// A locked or half-written row must not abort the whole archive: warn
@@ -114,6 +121,12 @@ func (r *runtime) export(out, warn io.Writer, formats []string, source string, o
 			tick(doneCount)
 			continue
 		}
+		// The IR is the subtitle's own record; a transcript written before the
+		// author was stored can carry an empty Author, so fall back to the
+		// video row's author to keep the zip's per-UP folder meaningful.
+		if doc.Author == "" {
+			doc.Author = v.Author
+		}
 		// Multi-P videos share a bvid and title, so both the map key and the
 		// document title need the page suffix; otherwise Pack rejects the
 		// duplicate stems.
@@ -124,6 +137,7 @@ func (r *runtime) export(out, warn io.Writer, formats []string, source string, o
 			doc.Title += suffix
 		}
 		docs[key] = &doc
+		keyIDs[key] = v.ID
 		doneCount++
 		tick(doneCount)
 	}
@@ -136,6 +150,15 @@ func (r *runtime) export(out, warn io.Writer, formats []string, source string, o
 	zipPath, err := export.Pack(outDir, time.Now(), docs, formats)
 	if err != nil {
 		return "", err
+	}
+	// Only after the archive is safely on disk: marking first would lose the
+	// video from a later export if Pack then failed.
+	packedIDs := make([]int64, 0, len(keyIDs))
+	for _, id := range keyIDs {
+		packedIDs = append(packedIDs, id)
+	}
+	if err := st.MarkExported(packedIDs); err != nil {
+		return "", fmt.Errorf("export: 标记已导出: %w", err)
 	}
 	fmt.Fprintf(out, "导出完成：%s（%d 个视频 × %d 种格式）\n", zipPath, len(docs), len(formats))
 	return zipPath, nil

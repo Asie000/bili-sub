@@ -122,7 +122,7 @@ func TestDownloaderFetchSubtitle(t *testing.T) {
 		t.Errorf("Referer=%q want https://www.bilibili.com", gotReferer)
 	}
 
-	srtPath := filepath.Join(out, util.SanitizeFilename(v.Title, v.Bvid)+".srt")
+	srtPath := filepath.Join(out, util.SanitizeDirName(v.Author), util.SanitizeFilename(v.Title, v.Bvid)+".srt")
 	srtBytes, err := os.ReadFile(srtPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", srtPath, err)
@@ -195,10 +195,11 @@ func TestDownloaderMultiPageFilenameSuffix(t *testing.T) {
 		t.Fatal(err)
 	}
 	plain := util.SanitizeFilename(v.Title, v.Bvid)
-	if _, err := os.Stat(filepath.Join(out, plain+"_P2.srt")); err != nil {
+	subDir := filepath.Join(out, util.SanitizeDirName(v.Author))
+	if _, err := os.Stat(filepath.Join(subDir, plain+"_P2.srt")); err != nil {
 		t.Fatalf("expected %s_P2.srt: %v", plain, err)
 	}
-	if _, err := os.Stat(filepath.Join(out, plain+".srt")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(subDir, plain+".srt")); !os.IsNotExist(err) {
 		t.Errorf("unsuffixed srt written for page 2: %v", err)
 	}
 }
@@ -439,7 +440,7 @@ func TestDownloaderNoUsableTrackLeavesStateUnchanged(t *testing.T) {
 			if _, _, _, err := st.GetTranscript(v.ID); err == nil {
 				t.Error("transcript saved on failure")
 			}
-			srtPath := filepath.Join(out, util.SanitizeFilename(v.Title, v.Bvid)+".srt")
+			srtPath := filepath.Join(out, util.SanitizeDirName(v.Author), util.SanitizeFilename(v.Title, v.Bvid)+".srt")
 			if _, err := os.Stat(srtPath); !os.IsNotExist(err) {
 				t.Errorf("srt written on failure: %v", err)
 			}

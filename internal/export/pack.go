@@ -15,8 +15,9 @@ import (
 
 // Pack renders every document in every format into one zip inside outDir.
 // The archive is named YYYYMMDD-N.zip where N is the number of files written,
-// and every entry is nested under a folder named exactly like the archive base
-// so that unzipping cannot scatter files into the current directory.
+// and every entry is nested under the archive base and the document's author
+// folder so that unzipping cannot scatter files into the current directory and
+// one UP主's subtitles stay together.
 //
 // A failed export leaves nothing behind: the partially written archive is
 // closed and removed before the error is returned.
@@ -51,10 +52,14 @@ func Pack(outDir string, now time.Time, docs map[string]*ir.Document, formats []
 			return "", fmt.Errorf("document %q: nil document", key)
 		}
 		stem := util.SanitizeFilename(d.Title, d.Bvid)
+		// Every entry is nested one level deeper under its author so one UP主's
+		// subtitles stay together, and two videos with the same title/bvid from
+		// different authors land in distinct folders instead of colliding.
+		folder := util.SanitizeDirName(d.Author)
 		for _, format := range formats {
-			entry := base + "/" + stem + "." + format
+			entry := base + "/" + folder + "/" + stem + "." + format
 			if _, dup := written[entry]; dup {
-				return "", fmt.Errorf("duplicate zip entry %q for stem %q: two documents share the same title and bvid", entry, stem)
+				return "", fmt.Errorf("duplicate zip entry %q for stem %q: two documents share the same author, title and bvid", entry, stem)
 			}
 			body, err := Render(d, format)
 			if err != nil {

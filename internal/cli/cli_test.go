@@ -20,6 +20,7 @@ import (
 	"bilibili-sub/internal/ir"
 	"bilibili-sub/internal/pipeline"
 	"bilibili-sub/internal/store"
+	"bilibili-sub/internal/util"
 )
 
 // TestRuntimeClientLoadsFullCookieFromSession pins that a session file carrying
@@ -160,7 +161,7 @@ func TestExportWritesZipFromStoredTranscript(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	id, err := st.UpsertVideo(&store.Video{Bvid: "BV1uv411q7Mv", Cid: 1, Title: "测试标题", State: store.StateFetched, PageIndex: 1})
+	id, err := st.UpsertVideo(&store.Video{Bvid: "BV1uv411q7Mv", Cid: 1, Title: "测试标题", Author: "测试UP主", State: store.StateFetched, PageIndex: 1})
 	if err != nil {
 		t.Fatalf("upsert video: %v", err)
 	}
@@ -197,6 +198,30 @@ func TestExportWritesZipFromStoredTranscript(t *testing.T) {
 	defer zr.Close()
 	if len(zr.File) != 2 {
 		t.Fatalf("zip entries = %d, want 2 (srt+txt)", len(zr.File))
+	}
+	// Every entry nests under the archive base and the author's folder.
+	stem := util.SanitizeFilename("测试标题", "BV1uv411q7Mv")
+	base := strings.TrimSuffix(filepath.Base(zips[0]), ".zip") + "/"
+	for _, f := range zr.File {
+		want := base + util.SanitizeDirName("测试UP主") + "/" + stem
+		if !strings.HasPrefix(f.Name, want) {
+			t.Errorf("entry %q, want it nested under %q", f.Name, want)
+		}
+	}
+
+	// A successful export marks the packaged video exported, so a later default
+	// export would skip it.
+	st, err = store.Open(filepath.Join(dir, "bili_sub.db"))
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer st.Close()
+	got, err := st.ListVideos(store.StateExported)
+	if err != nil {
+		t.Fatalf("list exported: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("exported rows = %+v, want the one packaged video", got)
 	}
 }
 
@@ -361,10 +386,10 @@ func TestDownloadTranscribeReportsMissingAudioSource(t *testing.T) {
 // TestWriteSubtitleFormats pins the filename agreement with
 // pipeline.Downloader.FetchSubtitle: the downloader owns the .srt, the command
 // writes the other formats beside it, and only multi-P videos get a _P{n}
-// suffix.
+// suffix. Both land in the same per-author folder the downloader uses.
 func TestWriteSubtitleFormats(t *testing.T) {
 	dir := t.TempDir()
-	v := store.Video{Bvid: "BV1uv411q7Mv", Title: "标题", PageIndex: 2}
+	v := store.Video{Bvid: "BV1uv411q7Mv", Title: "标题", Author: "某UP", PageIndex: 2}
 	doc := &ir.Document{
 		Bvid: "BV1uv411q7Mv", Title: "标题",
 		Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "你好"}},
@@ -377,11 +402,12 @@ func TestWriteSubtitleFormats(t *testing.T) {
 	if pageStem(v) != stem {
 		t.Fatalf("pageStem = %q, want %q", pageStem(v), stem)
 	}
-	if _, err := os.Stat(filepath.Join(dir, stem+".srt")); !os.IsNotExist(err) {
+	subDir := filepath.Join(dir, util.SanitizeDirName(v.Author))
+	if _, err := os.Stat(filepath.Join(subDir, stem+".srt")); !os.IsNotExist(err) {
 		t.Errorf(".srt must be left to FetchSubtitle, stat err = %v", err)
 	}
 	for _, format := range []string{"txt", "json"} {
-		if _, err := os.Stat(filepath.Join(dir, stem+"."+format)); err != nil {
+		if _, err := os.Stat(filepath.Join(subDir, stem+"."+format)); err != nil {
 			t.Errorf("%s.%s missing: %v", stem, format, err)
 		}
 	}
@@ -696,9 +722,12 @@ func TestDownloadScopesToSource(t *testing.T) {
 	}
 }
 
-// TestExportScopesToSource seeds fetched subtitles in two sources and proves
-// `export --source` packs only the named source's video.
-func TestExportScopesToSource(t *testing.T) {
+// TestExportPackagesOnlyNotYetExported pins the new contract: a default export
+// packages the fetched rows under their author's folder, marks them exported
+// afterwards, and a second default run finds nothing left. --include-exported
+// opts back into re-packaging the already-exported rows. Export is no longer
+// scoped by source, so both sources are packed together.
+func TestExportPackagesOnlyNotYetExported(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BILI_DATA_DIR", dir)
 
@@ -706,12 +735,13 @@ func TestExportScopesToSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	seed := func(bvid, title, source string) {
+	seed := func(bvid, title, author, state string) {
 		t.Helper()
-		id, err := st.UpsertVideo(&store.Video{Bvid: bvid, Cid: 1, Title: title, State: store.StateFetched, PageIndex: 1, SourceKey: source})
+		id, err := st.UpsertVideo(&store.Video{Bvid: bvid, Cid: 1, Title: title, Author: author, State: state, PageIndex: 1})
 		if err != nil {
 			t.Fatalf("upsert %s: %v", bvid, err)
 		}
+		// The IR deliberately omits Author: export must fall back to the row's.
 		doc := ir.Document{Bvid: bvid, Cid: 1, Title: title, Lang: "zh-Hans",
 			Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "你好"}}}
 		blob, err := json.Marshal(doc)
@@ -722,14 +752,15 @@ func TestExportScopesToSource(t *testing.T) {
 			t.Fatalf("save transcript %s: %v", bvid, err)
 		}
 	}
-	seed("BV1aaaa1111a", "源一", "111")
-	seed("BV1bbbb2222b", "源二", "222")
+	seed("BV1aaaa1111a", "源一", "UP甲", store.StateFetched)
+	seed("BV1bbbb2222b", "源二", "UP乙", store.StateTranscribed)
+	seed("BV1cccc3333c", "已导出", "UP丙", store.StateExported)
 	if err := st.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
 	}
 
-	if err := execute("export", "--format", "srt", "--source", "111"); err != nil {
-		t.Fatalf("export --source: %v", err)
+	if err := execute("export", "--format", "srt"); err != nil {
+		t.Fatalf("export: %v", err)
 	}
 
 	zips, err := filepath.Glob(filepath.Join(dir, "exports", "*.zip"))
@@ -744,10 +775,58 @@ func TestExportScopesToSource(t *testing.T) {
 		t.Fatalf("open zip: %v", err)
 	}
 	defer zr.Close()
-	if len(zr.File) != 1 {
-		t.Fatalf("zip entries = %d, want 1 (only source 111)", len(zr.File))
+	if len(zr.File) != 2 {
+		t.Fatalf("zip entries = %d, want 2 (the two not-yet-exported videos)", len(zr.File))
 	}
-	if !strings.Contains(zr.File[0].Name, "BV1aaaa1111a") {
-		t.Errorf("zip entry %q, want the source-111 video", zr.File[0].Name)
+	base := strings.TrimSuffix(filepath.Base(zips[0]), ".zip") + "/"
+	wantEntries := map[string]bool{
+		base + util.SanitizeDirName("UP甲") + "/" + util.SanitizeFilename("源一", "BV1aaaa1111a") + ".srt": true,
+		base + util.SanitizeDirName("UP乙") + "/" + util.SanitizeFilename("源二", "BV1bbbb2222b") + ".srt": true,
+	}
+	for _, f := range zr.File {
+		if !wantEntries[f.Name] {
+			t.Errorf("unexpected zip entry %q; want the two per-author entries %v", f.Name, wantEntries)
+		}
+	}
+
+	// Every seeded row is exported after a run that packaged two of them.
+	st, err = store.Open(filepath.Join(dir, "bili_sub.db"))
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	exported, err := st.ListVideos(store.StateExported)
+	if err != nil {
+		t.Fatalf("list exported: %v", err)
+	}
+	if len(exported) != 3 {
+		t.Fatalf("exported rows = %d, want all 3", len(exported))
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	// A second default export now has nothing left to package.
+	if err := execute("export", "--format", "srt"); err == nil {
+		t.Fatal("second default export: error = nil, want a nothing-to-export error")
+	}
+
+	// --include-exported re-packages the already-exported rows too.
+	if err := execute("export", "--format", "srt", "--include-exported"); err != nil {
+		t.Fatalf("export --include-exported: %v", err)
+	}
+	zips, err = filepath.Glob(filepath.Join(dir, "exports", "*.zip"))
+	if err != nil {
+		t.Fatalf("glob exports: %v", err)
+	}
+	if len(zips) != 2 {
+		t.Fatalf("exported zips = %v, want two after --include-exported", zips)
+	}
+	zr2, err := zip.OpenReader(zips[len(zips)-1])
+	if err != nil {
+		t.Fatalf("open second zip: %v", err)
+	}
+	defer zr2.Close()
+	if len(zr2.File) != 3 {
+		t.Fatalf("second zip entries = %d, want all 3 with --include-exported", len(zr2.File))
 	}
 }
