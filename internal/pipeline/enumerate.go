@@ -2,10 +2,13 @@ package pipeline
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"bilibili-sub/internal/bili"
 )
@@ -58,6 +61,35 @@ func (e *Enumerator) ResolveVideo(ctx context.Context, bvid string) (*bili.Video
 // EnumerateSpace lists an UP主's videos (ps=30 per page) until the reported
 // video count is covered or a page comes back empty. Space requests are
 // WBI-signed.
+// listingRetryBackoffs are the waits before retrying a listing page that
+// bilibili answered with an API-level rate-limit code. The space endpoint
+// intermittently answers `-404 啥都木有` (and occasionally `-412`) under load
+// even for an account that clearly has videos, so a couple of backed-off
+// retries turn a spurious failure into a normal result.
+var listingRetryBackoffs = []time.Duration{2 * time.Second, 5 * time.Second, 12 * time.Second}
+
+// fetchListingPage calls Get and retries the transient rate-limit codes.
+func (e *Enumerator) fetchListingPage(ctx context.Context, url string, params map[string]string, out any) error {
+	for attempt := 0; ; attempt++ {
+		err := e.Client.Get(ctx, url, params, out)
+		if err == nil {
+			return nil
+		}
+		var apiErr *bili.APIError
+		if !errors.As(err, &apiErr) || (apiErr.Code != -404 && apiErr.Code != -412) {
+			return err
+		}
+		if attempt >= len(listingRetryBackoffs) {
+			return fmt.Errorf("B站返回 %d（%s）：可能被临时限流，请等几分钟再试", apiErr.Code, apiErr.Message)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(listingRetryBackoffs[attempt]):
+		}
+	}
+}
+
 func (e *Enumerator) EnumerateSpace(ctx context.Context, mid string) ([]*bili.VideoInfo, error) {
 	signer, err := e.Signer(ctx)
 	if err != nil {
@@ -89,7 +121,7 @@ func (e *Enumerator) EnumerateSpace(ctx context.Context, mid string) ([]*bili.Vi
 				Count int `json:"count"`
 			} `json:"page"`
 		}
-		if err := e.Client.Get(ctx, e.SpaceBaseURL, params, &resp); err != nil {
+		if err := e.fetchListingPage(ctx, e.SpaceBaseURL, params, &resp); err != nil {
 			return nil, err
 		}
 		if len(resp.List.Vlist) == 0 {
@@ -101,6 +133,11 @@ func (e *Enumerator) EnumerateSpace(ctx context.Context, mid string) ([]*bili.Vi
 			}
 			info, err := e.ResolveVideo(ctx, v.Bvid)
 			if err != nil {
+				// One deleted/private video must not abort the whole listing.
+				var apiErr *bili.APIError
+				if errors.As(err, &apiErr) && apiErr.Code == -404 {
+					continue
+				}
 				return nil, err
 			}
 			videos = append(videos, info)
@@ -128,7 +165,7 @@ func (e *Enumerator) EnumerateFav(ctx context.Context, mediaID string) ([]*bili.
 			"pn":       strconv.Itoa(pn),
 			"platform": "web",
 		}
-		if err := e.Client.Get(ctx, e.FavBaseURL, params, &resp); err != nil {
+		if err := e.fetchListingPage(ctx, e.FavBaseURL, params, &resp); err != nil {
 			return nil, err
 		}
 		for _, m := range resp.Medias {
@@ -137,6 +174,11 @@ func (e *Enumerator) EnumerateFav(ctx context.Context, mediaID string) ([]*bili.
 			}
 			info, err := e.ResolveVideo(ctx, m.Bvid)
 			if err != nil {
+				// One deleted/private video must not abort the whole listing.
+				var apiErr *bili.APIError
+				if errors.As(err, &apiErr) && apiErr.Code == -404 {
+					continue
+				}
 				return nil, err
 			}
 			videos = append(videos, info)

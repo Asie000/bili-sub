@@ -387,29 +387,6 @@ function applyLoginStatus(state) {
   el.classList.remove("ok");
 }
 
-// buildBookmarklet turns the current origin into a javascript: bookmark. Clicking
-// it on a bilibili page POSTs that page's URL to this tool. The endpoint allows
-// exactly bilibili origins through CORS, so no extension is needed.
-function buildBookmarklet() {
-  const origin = location.origin;
-  const code =
-    "(function(){var u=location.href;" +
-    "fetch(" + JSON.stringify(origin + "/api/probe") + ",{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:u})})" +
-    ".then(function(r){return r.json()})" +
-    ".then(function(d){if(d&&d.error){alert('bili-sub 探测失败：'+d.error)}else{alert('bili-sub 已探测：共 '+d.probed+'，可下载 '+d.downloadable+'，无字幕 '+d.no_subtitle+'，失败 '+d.failed)}})" +
-    ".catch(function(e){alert('bili-sub 请求失败：'+e)});})()";
-  const link = $("bookmarklet");
-  if (!link) {
-    return;
-  }
-  link.href = "javascript:" + encodeURIComponent(code);
-  link.addEventListener("click", (e) => {
-    // On this page a click would probe the tool's own URL; ask for a drag.
-    e.preventDefault();
-    log("请把「拖我到书签栏」拖进浏览器书签栏，然后在 B站 页面点击它。");
-  });
-}
-
 function clearTable() {
   $("videos-body").textContent = "";
   $("stats").textContent = "";
@@ -564,4 +541,3 @@ updateExportHint();
 loadVideos();
 connectEvents();
 loadLoginStatus();
-buildBookmarklet();
