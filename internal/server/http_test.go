@@ -357,7 +357,7 @@ func TestDownloadEndpointBroadcastsProgress(t *testing.T) {
 	defer cancel()
 	s := newTestServer(t, Options{
 		Hub: hub,
-		Download: func(_ context.Context, _ string, _ bool, _ string, onProgress func(Progress)) (DownloadSummary, error) {
+		Download: func(_ context.Context, _ string, _ bool, _, _, _ string, onProgress func(Progress)) (DownloadSummary, error) {
 			onProgress(Progress{Op: "download", Done: 0, Total: 2})
 			onProgress(Progress{Op: "download", Done: 2, Total: 2})
 			return DownloadSummary{Fetched: 2}, nil
@@ -432,22 +432,65 @@ func TestVideosEndpointFiltersBySource(t *testing.T) {
 }
 
 func TestDownloadEndpointPassesLangTranscribeAndSource(t *testing.T) {
-	var gotLang, gotSource string
+	var gotLang, gotAsrLang, gotModel, gotSource string
 	var gotTranscribe bool
 	s := newTestServer(t, Options{
-		Download: func(_ context.Context, lang string, transcribe bool, source string, _ func(Progress)) (DownloadSummary, error) {
-			gotLang, gotTranscribe, gotSource = lang, transcribe, source
+		Download: func(_ context.Context, lang string, transcribe bool, asrLang, model, source string, _ func(Progress)) (DownloadSummary, error) {
+			gotLang, gotTranscribe, gotAsrLang, gotModel, gotSource = lang, transcribe, asrLang, model, source
 			return DownloadSummary{Fetched: 2, Failed: 1}, nil
 		},
 	})
 
-	rec := serve(t, s, http.MethodPost, "/api/download", `{"lang":"en","transcribe":true,"source":"12345"}`)
+	rec := serve(t, s, http.MethodPost, "/api/download", `{"lang":"en","transcribe":true,"asr_lang":"zh","model":"large-v3-turbo","source":"12345"}`)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
-	if gotLang != "en" || !gotTranscribe || gotSource != "12345" {
-		t.Fatalf("seam received lang=%q transcribe=%v source=%q, want en/true/12345", gotLang, gotTranscribe, gotSource)
+	if gotLang != "en" || !gotTranscribe || gotAsrLang != "zh" || gotModel != "large-v3-turbo" || gotSource != "12345" {
+		t.Fatalf("seam received lang=%q transcribe=%v asrLang=%q model=%q source=%q, want en/true/zh/large-v3-turbo/12345",
+			gotLang, gotTranscribe, gotAsrLang, gotModel, gotSource)
+	}
+}
+
+// TestDownloadPartialSuccessKeepsTheCounts pins the reporting rule for a run that
+// did work and then hit a leg-level failure (an expired session, a worker that
+// cannot start): the page must still see what was accomplished, with the reason
+// attached, instead of an empty 500 that says nothing happened.
+func TestDownloadPartialSuccessKeepsTheCounts(t *testing.T) {
+	s := newTestServer(t, Options{
+		Download: func(_ context.Context, _ string, _ bool, _, _, _ string, _ func(Progress)) (DownloadSummary, error) {
+			return DownloadSummary{Fetched: 3, Transcribed: 1, Failed: 0}, errors.New("音频接口要求登录态")
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/download", `{"transcribe":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 so the counts survive (body %s)", rec.Code, rec.Body.String())
+	}
+	var got DownloadSummary
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Fetched != 3 || got.Transcribed != 1 {
+		t.Errorf("summary = %+v, want the counts preserved", got)
+	}
+	if !strings.Contains(got.Error, "登录") {
+		t.Errorf("error field = %q, want the failure reason", got.Error)
+	}
+}
+
+// TestDownloadFailsWhenNothingHappened pins the other half: a run that produced
+// no counts at all is still a 500, so a real failure is not disguised as success.
+func TestDownloadFailsWhenNothingHappened(t *testing.T) {
+	s := newTestServer(t, Options{
+		Download: func(_ context.Context, _ string, _ bool, _, _, _ string, _ func(Progress)) (DownloadSummary, error) {
+			return DownloadSummary{}, errors.New("store 坏了")
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/download", `{}`)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("code = %d, want 500 (body %s)", rec.Code, rec.Body.String())
 	}
 }
 

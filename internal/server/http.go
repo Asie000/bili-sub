@@ -47,12 +47,14 @@ type Progress struct {
 
 // DownloadSummary is the outcome of one download run, as returned by
 // POST /api/download. The Transcribed/TranscribeFailed counters only move when
-// the request asked for the ASR leg.
+// the request asked for the ASR leg. Error is set when the run did work and then
+// failed part-way, so the counts are still reported alongside the reason.
 type DownloadSummary struct {
-	Fetched          int `json:"fetched"`
-	Failed           int `json:"failed"`
-	Transcribed      int `json:"transcribed"`
-	TranscribeFailed int `json:"transcribe_failed"`
+	Fetched          int    `json:"fetched"`
+	Failed           int    `json:"failed"`
+	Transcribed      int    `json:"transcribed"`
+	TranscribeFailed int    `json:"transcribe_failed"`
+	Error            string `json:"error,omitempty"`
 }
 
 // LoginState is what GET /api/login/status reports.
@@ -79,7 +81,7 @@ type HandoffResponse struct {
 type Options struct {
 	Store       *store.Store
 	Probe       func(ctx context.Context, url, kind string, force bool, onProgress func(Progress)) (ProbeSummary, error)
-	Download    func(ctx context.Context, lang string, transcribe bool, source string, onProgress func(Progress)) (DownloadSummary, error)
+	Download    func(ctx context.Context, lang string, transcribe bool, asrLang, model, source string, onProgress func(Progress)) (DownloadSummary, error)
 	Export      func(ctx context.Context, formats []string, includeExported bool, onProgress func(Progress)) (string, error)
 	Login       func(sessdata, cookie string) error
 	LoginStatus func(ctx context.Context) (LoginState, error)
@@ -353,6 +355,8 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Lang       string `json:"lang"`
 		Transcribe bool   `json:"transcribe"`
+		AsrLang    string `json:"asr_lang"`
+		Model      string `json:"model"`
 		Source     string `json:"source"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
@@ -362,10 +366,17 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	onProgress := func(p Progress) {
 		s.eventHub().Broadcast(Event{Type: "progress", Data: p})
 	}
-	summary, err := s.opts.Download(r.Context(), req.Lang, req.Transcribe, req.Source, onProgress)
+	summary, err := s.opts.Download(r.Context(), req.Lang, req.Transcribe, req.AsrLang, req.Model, req.Source, onProgress)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+		// A run that did work and then failed part-way (an expired session, a
+		// worker that cannot start) is reported as a partial success with the
+		// reason attached: a 500 would throw the counts away and tell the page
+		// nothing happened, when in fact the subtitles are already on disk.
+		if summary.Fetched == 0 && summary.Transcribed == 0 && summary.Failed == 0 && summary.TranscribeFailed == 0 {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		summary.Error = err.Error()
 	}
 	s.eventHub().Broadcast(Event{Type: "download", Data: summary})
 	writeJSON(w, http.StatusOK, summary)

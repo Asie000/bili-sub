@@ -77,6 +77,7 @@ uv pip install --python .asr-venv/Scripts/python.exe faster-whisper "av<19"
 - **模型名写一次就行**：在 `.env` 里设 `ASR_MODEL=large-v3-turbo`，`transcribe` / `download --transcribe` / 网页端都生效；临时换用 `--model` 覆盖。优先级：`--model` > `ASR_MODEL` > worker 默认（`small`）。不设 `ASR_MODEL` 时不会自动下载大模型，避免新环境一上手就拉几个 GB。
 - **输出会先洗一遍**（在 Go 侧做，对所有后端生效）：去掉 Whisper 漏出的 `<\|0.00\|>` 类特殊标记、丢掉乱码段和空段、去掉汉字之间多余的空格、**合并连续重复段**（静音/音乐上 Whisper 会卡住重复同一句，这是最常见的幻觉）、繁体转简体。保留繁体用 `ASR_SIMPLIFY=0`。
   - 实测（同一段 268 秒音频）：`tiny` 原始输出有 **175 种繁体字**，清理后 0 种；`small` 本来就不带繁体——所以繁体主要是**小模型**的问题。
+- 网页端也能选：勾上「无字幕时转写」后，旁边的**转写语言**和**模型**输入框会解锁；留空则用 `.env` 的 `ASR_MODEL`。转写在导出之前跑，转写失败**不会丢掉已下载的字幕**（导出照常，页面给出带计数的警告）。
 - 音频接口要求登录态：匿名请求 `playurl` 会得到 `-101 账号未登录`，先跑 `bili-sub login`。
 
 ---

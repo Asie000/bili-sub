@@ -101,7 +101,7 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 				Skipped:        stats.Skipped,
 			}, nil
 		},
-		Download: func(ctx context.Context, lang string, transcribe bool, source string, onProgress func(server.Progress)) (server.DownloadSummary, error) {
+		Download: func(ctx context.Context, lang string, transcribe bool, asrLang, model, source string, onProgress func(server.Progress)) (server.DownloadSummary, error) {
 			if !r.opMu.TryLock() {
 				return server.DownloadSummary{}, errOperationBusy
 			}
@@ -113,19 +113,18 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 				}
 			}
 			// The downloader owns the .srt; export renders the other formats
-			// from the stored IR, so only srt is written here. The web UI has no
-			// ASR language picker yet, so the transcription leg runs with the
-			// CLI's default language and model.
-			stats, err := r.download(ctx, io.Discard, lang, []string{export.FormatSRT}, transcribe, defaultASRLang, "", source, progress)
-			if err != nil {
-				return server.DownloadSummary{}, err
-			}
+			// from the stored IR, so only srt is written here. The language and
+			// model come from the page, falling back to the config inside
+			// runtime.transcribe.
+			stats, err := r.download(ctx, io.Discard, lang, []string{export.FormatSRT}, transcribe, asrLang, model, source, progress)
+			// The counts go back even when the run failed part-way: the handler
+			// decides whether that is a partial success or a real failure.
 			return server.DownloadSummary{
 				Fetched:          stats.Fetched,
 				Failed:           stats.Failed,
 				Transcribed:      stats.Transcribed,
 				TranscribeFailed: stats.TranscribeFailed,
-			}, nil
+			}, err
 		},
 		Export: func(_ context.Context, formats []string, includeExported bool, onProgress func(server.Progress)) (string, error) {
 			if !r.opMu.TryLock() {

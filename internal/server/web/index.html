@@ -50,6 +50,13 @@
         <option value="en">英文</option>
       </select>
       <label class="checkbox"><input id="transcribe" type="checkbox"> 无字幕时转写</label>
+      <label for="asr-lang">转写语言</label>
+      <select id="asr-lang" title="本地 ASR 的转写语言，仅在勾选转写时生效">
+        <option value="zh">中文</option>
+        <option value="en">英文</option>
+        <option value="">自动检测</option>
+      </select>
+      <input id="asr-model" type="text" size="14" placeholder="模型（默认按 .env）" title="Whisper 模型名；留空则用 .env 的 ASR_MODEL，都没有则用 worker 默认">
       <button id="download">获取字幕</button>
       <button id="export">导出</button>
       <label class="checkbox"><input type="checkbox" id="include-exported"> 包含已导出的</label>

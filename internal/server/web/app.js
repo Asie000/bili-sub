@@ -245,13 +245,31 @@ async function download() {
     const summary = await post("/api/download", {
       lang: $("lang").value,
       transcribe: $("transcribe").checked,
+      asr_lang: $("asr-lang").value,
+      model: $("asr-model").value.trim(),
     });
-    log(`获取字幕完成：成功 ${summary.fetched}，失败 ${summary.failed}`);
+    log(describeDownload(summary));
+    if (summary.error) {
+      // Part-way failure: the counts above are real, so this is a warning
+      // rather than a failure, and the progress bar must not go red.
+      log(`注意：${summary.error}`);
+    }
     await loadVideos();
   } catch (err) {
     showFailure();
     log(`获取字幕失败：${err.message}`);
   }
+}
+
+// describeDownload reports what a download run accomplished. The transcribed
+// counters only move when the ASR leg ran, so they are appended rather than
+// always shown.
+function describeDownload(summary) {
+  let text = `获取字幕完成：成功 ${summary.fetched}，失败 ${summary.failed}`;
+  if (summary.transcribed || summary.transcribe_failed) {
+    text += `；转写成功 ${summary.transcribed || 0}，失败 ${summary.transcribe_failed || 0}`;
+  }
+  return text;
 }
 
 // selectedFormats reads the format checkboxes the page offers. The server
@@ -416,7 +434,7 @@ function formatEvent(ev) {
     case "probe":
       return `探测事件：共 ${data.probed}，可下载 ${data.downloadable}，无字幕 ${data.no_subtitle}，充电锁定 ${data.charging_locked}，失败 ${data.failed}`;
     case "download":
-      return `下载事件：成功 ${data.fetched}，失败 ${data.failed}`;
+      return `下载事件：${describeDownload(data)}`;
     case "export":
       return `导出事件：${data.zip}`;
     case "reset":
@@ -509,6 +527,14 @@ function connectEvents() {
 
 $("probe").addEventListener("click", probe);
 $("download").addEventListener("click", download);
+// The ASR controls only matter when the transcribe box is ticked.
+function syncTranscribeControls() {
+  const on = $("transcribe").checked;
+  $("asr-lang").disabled = !on;
+  $("asr-model").disabled = !on;
+}
+$("transcribe").addEventListener("change", syncTranscribeControls);
+syncTranscribeControls();
 $("export").addEventListener("click", exportZip);
 $("refresh").addEventListener("click", loadVideos);
 $("clear").addEventListener("click", clearTable);
