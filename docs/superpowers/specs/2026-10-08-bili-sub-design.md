@@ -63,7 +63,7 @@
                  └──────────────┘                   │ 轮询消费
                                                      ▼
                                             ┌──────────────────┐
-                                            │ ffmpeg 抽 16k 音频 │
+                                            │ 下载 dash .m4s     │
                                             │ → Python ASR worker│
                                             │ → 落盘后删音频     │
                                             └──────────────────┘
@@ -82,7 +82,7 @@
 | 并发/限流 | `sync.WaitGroup` + `chan` + `golang.org/x/time/rate` | 令牌桶防 412 |
 | 存储 | SQLite，`modernc.org/sqlite`（纯 Go，免 CGO） | 单文件 |
 | CLI | `spf13/cobra` | 工业级命令体验 |
-| 音频 | `ffmpeg`（`os/exec` 调用） | 16kHz 单声道 |
+| 音频 | 无需额外工具：PyAV（faster-whisper 依赖）直接解 `.m4s` | 不转码、不落 wav；`os/exec`+ffmpeg 保留给以后的 whisper.cpp / sherpa |
 | ASR | **faster-whisper**（默认，CUDA/float16）+ 预留 SenseVoice | Python 常驻 worker，JSON-lines 协议 |
 | 前端 | Go 内嵌 HTML/CSS/JS（原生，无构建） | 浏览器访问 |
 | 打包 | 无（开发期不 embed exe） | |
@@ -97,17 +97,25 @@ BiliBili/
 ├── go.mod / go.sum
 ├── cmd/bili-sub/main.go            # CLI 入口与命令注册
 ├── internal/
-│   ├── bili/                        # client.go wbi.go login.go types.go
-│   ├── store/                       # db.go schema.go（SQLite + 状态机）
-│   ├── pipeline/                    # probe.go download.go（编排）
-│   ├── asr/                         # asr.go(接口) fasterwhisper.go
+│   ├── bili/                        # client.go wbi.go login.go types.go limiter.go
+│   ├── store/                       # db.go schema.go videos.go transcripts.go
+│   ├── pipeline/                    # enumerate.go probe.go download.go audio.go pool.go urlparse.go
+│   ├── cli/                         # root.go probe.go download.go transcribe.go export.go serve.go …
+│   ├── config/                      # config.go（.env / 环境变量）
+│   ├── ir/                          # ir.go（Canonical IR）
+│   ├── asr/                         # asr.go(接口) fasterwhisper.go worker.go audio.go
 │   ├── export/                      # render.go（IR→格式） pack.go（zip）
-│   ├── server/                      # http.go sse.go web/（内嵌页面）
-│   └── util/                        # srt.go time.go
-├── scripts/transcribe_worker.py     # Python ASR 常驻 worker
-├── web/                             # 内嵌浏览器页面（index.html + app.js + style.css）
+│   ├── server/                      # http.go sse.go qr.go web.go + web/（内嵌页面）
+│   └── util/                        # sanitize.go
+├── scripts/
+│   ├── transcribe_worker.py         # Python ASR 常驻 worker
+│   └── test_transcribe_worker.py    # 它的契约测试（由 go test ./internal/asr 调用）
+├── .asr-venv/                       # 本地 ASR 的 Python 环境（gitignore；**刻意放在 data/ 之外**，
+│                                    #   因为 `reset --yes` 会删掉整个 data/）
 └── data/                            # 运行产物（.gitignore）
     ├── bili_sub.db
+    ├── session.json                 # SESSDATA / 完整 Cookie
+    ├── audio/                       # 临时音频，转写完立即删
     ├── subtitles/
     └── exports/
 ```
@@ -182,11 +190,19 @@ IR 始终保留时间轴；**渲染 txt/json/md 时丢弃时间轴**，渲染 sr
 
 ## 九、ASR 兜底（可选）
 
+> 状态：**已实现并做过真实端到端验证**（2026-10-11）。两个与原计划的偏离见下。
+
 - **运行环境（已定）**：原生 Windows 安装 Python + `faster-whisper`，Go 直接调 `python.exe`，不走 WSL。
-- Python **常驻 worker**：模型只加载一次；Go 与 worker 通过 **stdin/stdout JSON-lines** 通信（`{"audio":"...","lang":"zh|en"}` → `{"segments":[...]}`）。
-- **转写语言（已定）**：本地 ASR **只支持中文、英文**两种，通过语言选择按钮指定；不提供其他语种。
-- 流程：`playurl` 取 dash 音频 m4a → 下载 → `ffmpeg -ar 16000 -ac 1` 转 wav → 喂 worker → 得 IR 落盘 → **立即删 m4a/wav**。
-- 后端接口 `asr.Backend`：`Transcribe(ctx, audioPath, opts) ([]Segment, error)`；默认 `faster-whisper`，`sensevoice` 预留。
+  - 需 3.9–3.12（3.13+ 无预编译包）；用 `uv venv --python 3.12 .asr-venv` 建独立环境。
+  - 刻意建在 `data/` **之外**：`bili-sub reset --yes` 会 `os.RemoveAll(dataDir)`，把环境建在 `data/` 里会被一并删掉。
+  - `av>=19` 与 faster-whisper 1.2.1 不兼容，安装时 pin `"av<19"`。
+- **算力（偏离原计划）**：不强制 CUDA。worker 先试 `cuda/float16`，推理时发现 CUDA 库缺失则自动降级 `cpu/int8`（ctranslate2 只在真正推理时才报错，构造时不会）。降级**只在 GPU 从未成功过时**才粘住：GPU 已经成功转录过、之后某个文件失败，说明是这个文件的问题，不该把整批降级。
+- **就绪探测**：`asr.Backend.Start()` 在任何视频被碰之前先探一次（worker 脚本是否存在 → `python -c "import faster_whisper"`），所以「没装 Python」「没装 faster-whisper」「脚本路径不对」都是**整条腿级失败**，只报一次并中止，不会变成每个视频各失败一次。
+- Python **常驻 worker**：模型只加载一次；Go 与 worker 通过 **stdin/stdout JSON-lines** 通信（`{"audio":"...","lang":"zh|en","model":"small"}` → `{"segments":[...],"error":""}`）。
+- **转写语言（已定）**：本地 ASR **只支持中文、英文**两种；命令行 `--lang`（默认 zh，传空则由模型自动检测）。
+- 流程（**偏离原计划：去掉 ffmpeg**）：`playurl` 取 dash 音频 m4s → 下载到 `data/audio/` → **直接**喂 worker（PyAV 自带解码器）→ 得 IR 落盘 srt + transcripts → **立即删 m4s**。省掉一次转码和一次 wav 落盘（一小时 wav 约 115MB）。
+- **登录要求**：`playurl` 是登录接口，匿名调用返回 `-101 账号未登录`；错误信息会直接提示先 `bili-sub login`。注意只有 `-101` 算「登录态失效」并中止整条腿，`-400` 只是这条请求被拒，仍按逐视频失败处理。
+- 后端接口 `asr.Backend`：`Start() error` / `Transcribe(ctx, audioPath, opts) ([]Segment, error)` / `Name() string` / `Close() error`；默认 `faster-whisper`，`sensevoice` 预留。
 - 必须开启 VAD，防止空白段幻觉。
 - 失败不阻塞其他视频，标 `failed` 可单独 `retry`。
 
@@ -211,17 +227,20 @@ IR 始终保留时间轴；**渲染 txt/json/md 时丢弃时间轴**，渲染 sr
 
 ## 十一、Web 界面（浏览器页面）
 
+> 状态：基础版已实现（登录 / 探测 / 下载 / 导出 / SSE）；下面标 ⛔ 的部分**尚未实现**，保留为后续计划。
+
 - `bili-sub serve --addr :8080` 启动；Go 内嵌 `web/` 下静态文件。
 - 页面（对齐参考插件）：
   - 顶部：登录状态 / Cookie 获取 / 主题
   - 输入区：粘贴 URL（自动识别类型）+「探测」
   - **语言选择按钮**：探测后列出该视频/当前列表中出现的字幕语言，供选择「拉哪几种语言」；默认按 `中文人工 > 中文AI > 英文 > 其他` 优先取一份，可手动切换。
   - 表格：序号、标题、作者、发布日期、字幕状态（含图标）、字幕语言、是否充电；支持清空、字段设置
-  - 操作：一键「获取字幕」「转写无字幕」「导出」；**转写语言选择按钮**（中文 / 英文）
-  - 实时进度：**SSE** 推送（探测/下载/转写进度、成功/跳过/失败计数）
+  - 操作：一键「获取字幕」「转写无字幕」「导出」；⛔ **转写语言选择按钮**（中文 / 英文）尚未实现——现在固定用 `zh`
+  - 实时进度：**SSE** 推送（探测/下载/转写进度、成功/跳过/失败计数）；⛔ 转写进度目前复用 `download` 事件，未单独区分
 - 后端 API（JSON）：
   - `POST /api/login/sessdata`、`GET /api/login/qrcode`
-  - `POST /api/probe`、`POST /api/download`、`POST /api/transcribe`
+  - `POST /api/probe`、`POST /api/download`
+  - ⛔ `POST /api/transcribe` 未实现：ASR 目前挂在 `POST /api/download` 的 `{"transcribe":true}` 上
   - `POST /api/export`
   - `GET /api/videos`、`GET /api/stats`
   - `GET /api/events`（SSE）
@@ -270,6 +289,6 @@ IR 始终保留时间轴；**渲染 txt/json/md 时丢弃时间轴**，渲染 sr
 
 ## 十五、后续（非第一版）
 
-- ASR worker 的 Python 环境：沿用已装好的 WSL/Windows Python，用 `uv` 建 venv 并安装 `faster-whisper`；模型缓存路径固定到 `data/models/`，首次运行自动下载。
+- ASR worker 的 Python 环境：见 §九 —— 原生 Windows Python 3.9–3.12（不走 WSL），venv 建在 `.asr-venv/`。**不要放 `data/` 下**：`reset --yes` 会整目录删除，连 Python 环境一起删。装依赖用 `pip install faster-whisper "av<19"`；模型首次运行自动下载到 HuggingFace 缓存。
 - 第二版：合集 + 视频选集；第三版：搜索页。
 - 视频列表「字段设置」：第一版固定展示序号/标题/作者/发布日期/字幕状态/字幕语言/是否充电，后续再加可配置。

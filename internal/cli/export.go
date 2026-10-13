@@ -61,10 +61,10 @@ func (r *runtime) export(out, warn io.Writer, formats []string, includeExported 
 	if err != nil {
 		return "", err
 	}
-	// transcribed is included so ASR output (Task 15) is exported too, even
-	// though nothing writes that state yet. A video cannot be in two states at
-	// once, but the merge still dedupes by id so a future overlap cannot pack
-	// one video twice.
+	// transcribed is included so the ASR leg's output is exported too; the
+	// transcribe command is what writes that state. A video cannot be in two
+	// states at once, but the merge still dedupes by id so an overlap can never
+	// pack one video twice.
 	states := []string{store.StateFetched, store.StateTranscribed}
 	if includeExported {
 		states = append(states, store.StateExported)

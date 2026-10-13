@@ -11,17 +11,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"bilibili-sub/internal/asr"
 	"bilibili-sub/internal/export"
 	"bilibili-sub/internal/ir"
 	"bilibili-sub/internal/pipeline"
 	"bilibili-sub/internal/store"
 )
-
-// transcribeWorkerScript is the faster-whisper worker the CLI asks Python to
-// run. It is resolved relative to the working directory, where `go run` and the
-// built binary are expected to be started from.
-const transcribeWorkerScript = "scripts/transcribe_worker.py"
 
 // newDownloader is a variable so tests can point the downloader at fake
 // servers without touching the network; production always uses the real
@@ -50,6 +44,14 @@ func newDownloadCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			asrLang, err := cmd.Flags().GetString("asr-lang")
+			if err != nil {
+				return err
+			}
+			model, err := cmd.Flags().GetString("model")
+			if err != nil {
+				return err
+			}
 			formats, err := parseFormats(format)
 			if err != nil {
 				return err
@@ -59,48 +61,56 @@ func newDownloadCmd() *cobra.Command {
 				return err
 			}
 			defer rt.close()
-			_, err = rt.download(cmd.Context(), cmd.OutOrStdout(), lang, formats, transcribe, source, nil)
+			_, err = rt.download(cmd.Context(), cmd.OutOrStdout(), lang, formats, transcribe, asrLang, model, source, nil)
 			return err
 		},
 	}
 	cmd.Flags().String("lang", "", "字幕语言（如 zh、en），空则自动选择")
 	cmd.Flags().String("format", "srt", "落盘格式，逗号分隔：srt,txt,md,json")
-	cmd.Flags().Bool("transcribe", false, "为无字幕视频启用本地 ASR（v1 尚无音频源，会如实提示跳过）")
+	cmd.Flags().Bool("transcribe", false, "对无字幕视频启用本地 ASR 转写")
 	cmd.Flags().String("source", "", "只下载该来源（source_key）的可下载字幕，空则处理全部")
+	cmd.Flags().String("asr-lang", defaultASRLang, "配合 --transcribe 的转写语言：zh 或 en（空则自动检测）")
+	cmd.Flags().String("model", "", "配合 --transcribe 的 Whisper 模型名（空则用 worker 默认）")
 	return cmd
 }
 
 // downloadStats is what one download run produced, for the CLI summary line and
-// the HTTP /api/download DownloadSummary.
+// the HTTP /api/download DownloadSummary. The Transcribed/TranscribeFailed
+// counters stay zero unless --transcribe ran.
 type downloadStats struct {
-	Total   int
-	Fetched int
-	Failed  int
+	Total            int
+	Fetched          int
+	Failed           int
+	Transcribed      int
+	TranscribeFailed int
 }
 
-func (r *runtime) download(ctx context.Context, out io.Writer, lang string, formats []string, transcribe bool, source string, onProgress func(done, total int)) (downloadStats, error) {
+// download runs the two halves of `download`: the subtitle fetch first, because
+// it is quick and independent, then the ASR leg for whatever is left without a
+// subtitle. The subtitle half keeps a half-downloaded row downloadable; the ASR
+// half only ever sees no_subtitle rows, so the two never contend for a video.
+func (r *runtime) download(ctx context.Context, out io.Writer, lang string, formats []string, transcribe bool, asrLang, model, source string, onProgress func(done, total int)) (downloadStats, error) {
+	stats, err := r.downloadSubtitles(ctx, out, lang, formats, source, onProgress)
+	if err != nil {
+		return stats, err
+	}
+	if !transcribe {
+		return stats, nil
+	}
+	ts, err := r.transcribe(ctx, out, asrLang, model, source, onProgress)
+	stats.Transcribed = ts.OK
+	stats.TranscribeFailed = ts.Failed
+	if err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+func (r *runtime) downloadSubtitles(ctx context.Context, out io.Writer, lang string, formats []string, source string, onProgress func(done, total int)) (downloadStats, error) {
 	var stats downloadStats
 	st, err := r.store()
 	if err != nil {
 		return stats, err
-	}
-
-	if transcribe {
-		// Task 15 wires the pluggable ASR seam but deliberately stops short of
-		// fetching play audio. Without an audio source there is nothing to
-		// transcribe, so --transcribe says so instead of pretending to work.
-		backend := asr.NewFasterWhisper(r.cfg.PythonPath, transcribeWorkerScript, "")
-		defer backend.Close()
-		fmt.Fprintf(out, "本地 ASR 后端：%s（Python=%s，脚本=%s）。\n",
-			backend.Name(), r.cfg.PythonPath, transcribeWorkerScript)
-		noSubtitle, err := st.ListVideosFiltered(store.StateNoSubtitle, source)
-		if err != nil {
-			return stats, err
-		}
-		if len(noSubtitle) > 0 {
-			fmt.Fprintf(out, "注意：%d 个无字幕视频需要本地转写，但 v1 尚未下载播放音频（缺少音频源），本次跳过、不转写。\n",
-				len(noSubtitle))
-		}
 	}
 
 	videos, err := st.ListVideosFiltered(store.StateDownloadable, source)
@@ -194,16 +204,4 @@ func writeSubtitleFormats(dir string, v store.Video, doc *ir.Document, formats [
 		}
 	}
 	return nil
-}
-
-func newTranscribeCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "transcribe",
-		Short: "对无字幕视频转写（v1 尚无音频源）",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintln(cmd.OutOrStdout(), "transcribe: 本地 ASR 后端已接入，但 v1 尚未下载播放音频，暂无法转写无字幕视频。")
-			return nil
-		},
-	}
 }

@@ -27,11 +27,12 @@ const transcriptEngine = "bilibili"
 // and the payload is small, so this is deliberately shorter than a video fetch.
 const subtitleHTTPTimeout = 30 * time.Second
 
-// subtitleUserAgent and subtitleReferer are the headers the subtitle CDN needs;
-// they mirror the unexported values bili.Client sends on API requests.
+// browserUserAgent and browserReferer are the headers the subtitle and audio
+// CDNs need; they mirror the unexported values bili.Client sends on API
+// requests.
 const (
-	subtitleUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-	subtitleReferer   = "https://www.bilibili.com"
+	browserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+	browserReferer   = "https://www.bilibili.com"
 )
 
 // Downloader turns one video's subtitle track into an IR document, an .srt file
@@ -158,8 +159,8 @@ func (d *Downloader) fetchBody(ctx context.Context, rawURL string) ([]ir.Segment
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", subtitleUserAgent)
-	req.Header.Set("Referer", subtitleReferer)
+	req.Header.Set("User-Agent", browserUserAgent)
+	req.Header.Set("Referer", browserReferer)
 
 	hc := d.HTTP
 	if hc == nil {

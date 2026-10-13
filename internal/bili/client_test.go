@@ -209,3 +209,22 @@ func TestGetReturnsClearErrorAfterRepeated412(t *testing.T) {
 		t.Fatalf("api calls = %d, want 4 (initial + three retries)", apiCalls)
 	}
 }
+
+// TestAPIErrorSessionExpiredIsNarrowerThanUnauthorized pins why the two
+// predicates both exist: only -101 means the login itself is gone, so only
+// -101 may stop a run and ask the user to log in again. -400 stays a per-request
+// failure.
+func TestAPIErrorSessionExpiredIsNarrowerThanUnauthorized(t *testing.T) {
+	expired := &APIError{Code: -101, Message: "账号未登录"}
+	rejected := &APIError{Code: -400, Message: "请求错误"}
+
+	if !expired.SessionExpired() {
+		t.Error("-101 must count as an expired session")
+	}
+	if rejected.SessionExpired() {
+		t.Error("-400 is a rejected request, not an expired session")
+	}
+	if !expired.Unauthorized() || !rejected.Unauthorized() {
+		t.Error("Unauthorized must keep covering both codes: it is exported API")
+	}
+}

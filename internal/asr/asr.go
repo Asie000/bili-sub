@@ -20,6 +20,11 @@ type Options struct {
 // faster-whisper worker can later be swapped for another engine without
 // touching the download/export pipeline.
 type Backend interface {
+	// Start readies the engine before any work is handed to it. A backend whose
+	// engine is missing (no Python, no faster-whisper) fails here, which lets a
+	// caller report that once instead of discovering it as a failure of every
+	// single video. Calling Start on an already-started backend is a no-op.
+	Start() error
 	// Transcribe turns one audio file into timestamped IR segments.
 	Transcribe(ctx context.Context, audioPath string, opts Options) ([]ir.Segment, error)
 	// Name identifies the engine that produced a transcript (stored next to

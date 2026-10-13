@@ -9,7 +9,7 @@
 1. **业务目标**：
    - 支持按 **UP主空间（UID）**、**收藏夹（FID）**、**视频合集（Season/Collection）** 批量枚举视频。
    - 优先拉取 B 站自带的官方/AI 字幕（转换保存为 `.srt` 等格式）。
-   - 对无字幕视频，自动下载音频流（16kHz 单声道），调用本地 **Whisper / SenseVoice** 模型补齐转写。
+   - 对无字幕视频，自动下载 dash 音频流（`.m4s`，不转码、不落 wav），调用本地 **Whisper** 模型补齐转写。
    - 稳健支撑 **上千个视频** 的离线批处理，具备断点续传、失败重试、自动去重、风控退避机制。
    - 支持多格式导出（SRT / VTT / ASS / TXT / JSON）。
 
@@ -36,8 +36,8 @@
                     │  6. 多格式渲染 (Canonical IR -> SRT/VTT/ASS) │
                     └───────┬──────────────────────────────┬───────┘
                             │                              │
-                   有字幕直接下载落盘              无字幕时调度 ffmpeg
-                            │                      提取音频并写入任务表
+                   有字幕直接下载落盘              无字幕时下载 dash 音频
+                            │                      （data/audio/*.m4s）
                             ▼                              │
                     ┌──────────────┐                       ▼
                     │  本地字幕库   │              ┌───────────────┐
@@ -53,6 +53,30 @@
                                                   │ 或 whisper.cpp)│
                                                   └───────────────┘
 ```
+
+### 实现现状（2026-10-11）
+
+`playurl → dash 音频 → 本地 ASR → srt/IR → 导出` 这条链路已打通，并有真实端到端验证
+（首个冒烟测试：223 秒音频 + `tiny` 模型 + CPU int8，25 秒出 84 条字幕）。与最初计划不同的两个决定：
+
+1. **不用 ffmpeg**。faster-whisper 靠 PyAV 解码，`.m4s` 直接喂给 worker 即可，少一次转码、少一次落盘。
+2. **CUDA 缺失自动降级**。ctranslate2 只在真正推理时才发现 `cublas64_12.dll` 缺失，worker 会捕获并改用 `cpu/int8`；装了 CUDA 库则自动走 `cuda/float16`。降级只在 GPU **从未成功过**时生效——已经成功过之后再失败，那是文件的问题，不该把整批拖慢 20 倍。
+
+本地 ASR 环境（一次性）。**venv 要建在 `data/` 之外**，因为 `bili-sub reset --yes` 会删掉整个 `data/`：
+
+```bash
+uv venv --python 3.12 .asr-venv
+uv pip install --python .asr-venv/Scripts/python.exe faster-whisper "av<19"
+```
+
+- `av>=19` 与 faster-whisper 1.2.1 不兼容（`open() got an unexpected keyword argument 'metadata_errors'`），必须 pin `av<19`。
+- 然后在 `.env` 里设 `PYTHON_PATH=<仓库>\.asr-venv\Scripts\python.exe`（系统默认 Python 若是 3.13+ 会装不上 faster-whisper）。
+- ⚠️ 切勿把 venv 放进 `data/`：`bili-sub reset --yes` 执行的是 `os.RemoveAll(dataDir)`，会把整个 Python 环境和已装依赖一起删掉。
+- GPU 可选：`uv pip install --python .asr-venv/Scripts/python.exe nvidia-cublas-cu12 nvidia-cudnn-cu12` 后 worker 自动走 `cuda/float16`；没装 CUDA 运行库也不影响，会自动降级 `cpu/int8`。（同一台 4060、同一段 268 秒音频、`small` 模型：GPU float16 24 秒，CPU int8 8 分 16 秒，约 20 倍。）
+- 首次运行自动下载模型；`--model tiny` 只适合冒烟测试，中文至少 `small`，追求质量用 `large-v3-turbo`。
+- 音频接口要求登录态：匿名请求 `playurl` 会得到 `-101 账号未登录`，先跑 `bili-sub login`。
+
+---
 
 ### 核心解耦原则
 - **控制面（Go）**：专注网络 I/O、协议解析、防封限流、任务去重、文件管理。
@@ -70,8 +94,8 @@
 | **并发与限流** | `sync.WaitGroup` + `Channel` + `golang.org/x/time/rate` | Go 的并发招牌，令牌桶平滑限流防 412 |
 | **本地状态存储** | **SQLite** (`modernc.org/sqlite` 纯 Go 驱动) | 免 CGO 编译，单文件自包含，轻松支持数万条记录 |
 | **命令行交互** | `spf13/cobra` 或标准库 `flag` | 构建工业级 CLI 体验（`run`、`status`、`retry`） |
-| **音频抽取处理** | 系统安装 **`ffmpeg`**（通过 Go `os/exec` 调用） | 稳定、零内存泄漏提取 16kHz 单声道 wav/flac |
-| **本地 ASR 引擎** | **faster-whisper**（N卡）或 **SenseVoice**（中文更优）或 **whisper.cpp**（CPU） | 借助成熟 C++/CUDA 内核，避免语言重复造轮子 |
+| **音频抽取处理** | **不需要 ffmpeg**：faster-whisper 依赖的 PyAV 自带解码器，直接喂 `.m4s` | 省掉一次转码 + 一次落盘（一小时 wav 约 115MB）；`os/exec` 调 ffmpeg 的能力保留给 whisper.cpp / sherpa 后端 |
+| **本地 ASR 引擎** | **faster-whisper**（默认）或 **SenseVoice**（中文更优）或 **whisper.cpp**（CPU） | 借助成熟 C++/CUDA 内核，避免语言重复造轮子 |
 | **前端看板（可选）** | **Vue 3 + Naive UI + Vite** | 作为后期阶段练习，通过 Go `net/http` 暴露 API / SSE 挂载 |
 
 ---
@@ -121,10 +145,10 @@
 ### 阶段四：跨语言串联——音频抽取与本地 Whisper 自动转写
 > **目标**：当视频检测为「无官方字幕」时，自动走本地模型离线兜底流水线。
 
-- [ ] **Task 4.1**：从 B 站 playurl 接口获取 dash 音频流（m4a）并下载。
-- [ ] **Task 4.2**：Go 通过 `os/exec` 调 `ffmpeg` 降采样转换为 `16kHz 单声道 wav/flac`。
-- [ ] **Task 4.3**：编写独立的 ASR 常驻脚本/命令（Python `faster-whisper` 或 `whisper.cpp`），Go 负责调度。
-- [ ] **Task 4.4**：转写完成后保存 `.srt`，**立刻删除庞大的临时音频文件**，释放磁盘空间。
+- [x] **Task 4.1**：从 B 站 playurl 接口获取 dash 音频流（`fnval=16` + WBI 签名）并下载。
+- [x] **Task 4.2**：下载 `playurl` 的 dash 音频（`data/audio/<bvid>-<cid>.m4s`），**直接**喂给 worker，不经过 ffmpeg。
+- [x] **Task 4.3**：编写独立的 ASR 常驻脚本/命令（Python `faster-whisper`，`scripts/transcribe_worker.py`），Go 负责调度。
+- [x] **Task 4.4**：转写完成后保存 `.srt`，**立刻删除庞大的临时音频文件**，释放磁盘空间。
 - **Go 核心学习点**：
   - `os/exec.Command` 子进程生命周期管理、标准输入输出管道捕获。
   - 临时文件安全管理与磁盘 I/O。
@@ -148,9 +172,9 @@
    - `SESSDATA` 严禁提交至 Git 仓库，统一走本地 `.env` 或配置文件加载。
 2. **磁盘空间与生命周期**：
    - 1000 个视频如果全部留存音频，会吃掉上百 GB 空间。
-   - 策略必须是：**下载音频 -> 转写成功落盘 srt -> 校验文件存在 -> 立即删除 wav**。
+   - 策略必须是：**下载音频 -> 转写成功落盘 srt -> 校验文件存在 -> 立即删除音频**（成功失败都删，`data/audio/` 不积压）。
 3. **Whisper 算力评估**：
-   - 尽量优先匹配 N 卡（CUDA）运行；如果只有 CPU，优先使用 `whisper.cpp` 的量化模型或 `SenseVoiceSmall`。
+   - 自动优先 CUDA（`cuda/float16`），CUDA 库缺失时自动降级 `cpu/int8`；CPU 下可用 `small` + int8 顶住。
    - 务必开启 VAD（语音活动检测），防止背景空白产生大段重复幻觉。
 
 ---
@@ -170,17 +194,24 @@ BiliBili/
 │   │   ├── client.go
 │   │   ├── wbi.go
 │   │   └── types.go
-│   ├── store/                 # SQLite 任务表读写
+│   ├── store/                 # SQLite 读写与状态机
 │   │   └── db.go
-│   ├── downloader/            # 字幕与音频并发下载器
-│   │   └── downloader.go
+│   ├── pipeline/              # 枚举 / 探测 / 字幕+音频下载 / 并发池
+│   │   ├── audio.go           # playurl -> dash .m4s
+│   │   ├── download.go        # 字幕 -> IR + .srt
+│   │   ├── enumerate.go
+│   │   ├── probe.go
+│   │   └── pool.go
+│   ├── cli/                   # 命令实现与编排 (probe/download/transcribe/export)
 │   ├── asr/                   # ASR 调度 (调用本地模型/脚本)
 │   │   └── asr.go
-│   └── util/                  # 时间转换、SRT格式拼装等工具
-│       └── srt.go
+│   └── util/                  # 文件名清洗、时间转换等工具
+│       └── sanitize.go
 ├── scripts/                   # Python 辅助脚本 (faster-whisper worker)
-│   └── transcribe.py
+│   ├── transcribe_worker.py
+│   └── test_transcribe_worker.py
 └── data/                      # 默认运行产物目录 (被 .gitignore 忽略)
     ├── bili_sub.db            # SQLite 数据库
+    ├── audio/                 # 临时 dash 音频（转写完立即删除）
     └── subtitles/             # 输出字幕目录
 ```

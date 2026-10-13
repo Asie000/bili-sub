@@ -1,5 +1,6 @@
 .superpowers/
 data/
+.asr-venv/
 .env
 *.db
 exports/

@@ -46,10 +46,13 @@ type Progress struct {
 }
 
 // DownloadSummary is the outcome of one download run, as returned by
-// POST /api/download.
+// POST /api/download. The Transcribed/TranscribeFailed counters only move when
+// the request asked for the ASR leg.
 type DownloadSummary struct {
-	Fetched int `json:"fetched"`
-	Failed  int `json:"failed"`
+	Fetched          int `json:"fetched"`
+	Failed           int `json:"failed"`
+	Transcribed      int `json:"transcribed"`
+	TranscribeFailed int `json:"transcribe_failed"`
 }
 
 // LoginState is what GET /api/login/status reports.

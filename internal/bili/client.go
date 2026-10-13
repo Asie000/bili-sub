@@ -43,7 +43,17 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("bilibili code=%d message=%s", e.Code, e.Message)
 }
 
+// Unauthorized reports both codes that mean bilibili did not accept the request:
+// -101 (not logged in) and -400 (malformed). Prefer SessionExpired when the
+// question is specifically "is the stored login dead?"; this broader predicate is
+// kept because it is exported API.
 func (e *APIError) Unauthorized() bool { return e.Code == -101 || e.Code == -400 }
+
+// SessionExpired reports the code bilibili uses when the stored login is no
+// longer usable. It is deliberately narrower than Unauthorized: -400 is
+// bilibili rejecting one malformed request, which must stay a failure of that
+// request instead of stopping a whole run or telling the user to log in again.
+func (e *APIError) SessionExpired() bool { return e.Code == -101 }
 
 type Client struct {
 	HTTP     *http.Client
