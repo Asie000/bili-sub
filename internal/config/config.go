@@ -16,6 +16,10 @@ type Config struct {
 	QPS         float64
 	FFmpegPath  string
 	PythonPath  string
+	// ASRModel is the Whisper model the local ASR leg uses. Empty means "let the
+	// worker script pick", so a fresh checkout does not silently download a
+	// multi-gigabyte model on its first run.
+	ASRModel string
 }
 
 func Default() *Config {
@@ -65,7 +69,7 @@ func Load(envPath string) (*Config, error) {
 }
 
 func (c *Config) applyEnv() error {
-	for _, k := range []string{"SESSDATA", "BILI_CONCURRENCY", "BILI_QPS", "FFMPEG_PATH", "PYTHON_PATH", "BILI_DATA_DIR"} {
+	for _, k := range []string{"SESSDATA", "BILI_CONCURRENCY", "BILI_QPS", "FFMPEG_PATH", "PYTHON_PATH", "BILI_DATA_DIR", "ASR_MODEL"} {
 		if v := os.Getenv(k); v != "" {
 			if err := c.set(k, v); err != nil {
 				return fmt.Errorf("config %s: %w", k, err)
@@ -98,6 +102,8 @@ func (c *Config) set(k, v string) error {
 		c.FFmpegPath = v
 	case "PYTHON_PATH":
 		c.PythonPath = v
+	case "ASR_MODEL":
+		c.ASRModel = v
 	}
 	return nil
 }

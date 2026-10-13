@@ -67,7 +67,7 @@ func newTranscribeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().String("lang", defaultASRLang, "转写语言：zh 或 en（传空字符串则让模型自动检测）")
-	cmd.Flags().String("model", "", "Whisper 模型名（空则用 worker 默认）")
+	cmd.Flags().String("model", "", "Whisper 模型名（默认取 .env 的 ASR_MODEL，两者都为空则用 worker 默认）")
 	cmd.Flags().String("source", "", "只转写该来源（source_key）的无字幕视频，空则处理全部")
 	return cmd
 }
@@ -109,6 +109,12 @@ func (r *runtime) transcribe(ctx context.Context, out io.Writer, lang, model, so
 	client, err := r.client()
 	if err != nil {
 		return stats, err
+	}
+	if model == "" {
+		// --model > ASR_MODEL in .env > the worker script's own default. The
+		// fallback lives here rather than in each command so `transcribe`,
+		// `download --transcribe` and the web UI all inherit it.
+		model = r.cfg.ASRModel
 	}
 	backend := newASRBackend(r.cfg.PythonPath, transcribeWorkerScript, model)
 	defer backend.Close()

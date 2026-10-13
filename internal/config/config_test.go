@@ -27,6 +27,9 @@ func TestDefault(t *testing.T) {
 	if c.PythonPath != "python" {
 		t.Errorf("PythonPath = %q, want %q", c.PythonPath, "python")
 	}
+	if c.ASRModel != "" {
+		t.Errorf("ASRModel = %q, want empty so the worker's own default applies", c.ASRModel)
+	}
 	if c.SESSDATA != "" {
 		t.Errorf("SESSDATA = %q, want empty", c.SESSDATA)
 	}
@@ -34,7 +37,7 @@ func TestDefault(t *testing.T) {
 
 // envKeys are every variable Load consults; clearing them keeps each case
 // independent of the developer's real environment.
-var envKeys = []string{"SESSDATA", "BILI_CONCURRENCY", "BILI_QPS", "FFMPEG_PATH", "PYTHON_PATH", "BILI_DATA_DIR"}
+var envKeys = []string{"SESSDATA", "BILI_CONCURRENCY", "BILI_QPS", "FFMPEG_PATH", "PYTHON_PATH", "BILI_DATA_DIR", "ASR_MODEL"}
 
 func TestLoad(t *testing.T) {
 	tests := []struct {
@@ -54,6 +57,7 @@ func TestLoad(t *testing.T) {
 				"BILI_DATA_DIR=d2",
 				"FFMPEG_PATH=C:/tools/ffmpeg.exe",
 				"PYTHON_PATH=python3",
+				"ASR_MODEL=small",
 			}, "\n"),
 			want: &Config{
 				SESSDATA:    "sess-value",
@@ -63,6 +67,7 @@ func TestLoad(t *testing.T) {
 				QPS:         1.5,
 				FFmpegPath:  "C:/tools/ffmpeg.exe",
 				PythonPath:  "python3",
+				ASRModel:    "small",
 			},
 		},
 		{
@@ -81,6 +86,21 @@ func TestLoad(t *testing.T) {
 				QPS:         4.5,
 				FFmpegPath:  "file-ffmpeg",
 				PythonPath:  "python",
+			},
+		},
+		{
+			name:    "asr model comes from the environment when the file omits it",
+			envFile: "SESSDATA=x\n",
+			env:     map[string]string{"ASR_MODEL": "large-v3-turbo"},
+			want: &Config{
+				SESSDATA:    "x",
+				DataDir:     "data",
+				DBPath:      filepath.Join("data", "bili_sub.db"),
+				Concurrency: 3,
+				QPS:         2,
+				FFmpegPath:  "ffmpeg",
+				PythonPath:  "python",
+				ASRModel:    "large-v3-turbo",
 			},
 		},
 		{

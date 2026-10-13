@@ -602,3 +602,53 @@ func TestTranscribeMultiPageWritesPageSuffix(t *testing.T) {
 		t.Errorf("multi-P srt missing: %v", err)
 	}
 }
+
+// transcribeModel runs one seeded no-subtitle video through `transcribe` and
+// returns the model name the ASR backend was constructed with.
+func transcribeModel(t *testing.T, extraArgs ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("BILI_DATA_DIR", dir)
+	seedVideoRow(t, dir, store.Video{
+		Bvid: "BV1nosubtitle", Cid: 42, Author: "某UP", Title: "无字幕视频",
+		State: store.StateNoSubtitle,
+	})
+
+	overrideAudioPipeline(t, newAudioServer(t).URL)
+	backend := &fakeASR{segments: []ir.Segment{{StartMs: 0, EndMs: 500, Text: "内容"}}}
+	var gotModel string
+	overrideASRBackend(t, backend, &gotModel)
+
+	args := append([]string{"transcribe"}, extraArgs...)
+	if out, err := executeOut(t, args...); err != nil {
+		t.Fatalf("transcribe %v: %v\n%s", extraArgs, err, out)
+	}
+	return gotModel
+}
+
+// TestTranscribeModelSelection pins the precedence: --model wins, otherwise the
+// ASR_MODEL config value is used, otherwise the name is left empty so the worker
+// script's own default applies. Without the middle step every run would need the
+// flag spelled out.
+func TestTranscribeModelSelection(t *testing.T) {
+	t.Run("the ASR_MODEL config value is used when the flag is absent", func(t *testing.T) {
+		t.Setenv("ASR_MODEL", "large-v3-turbo")
+		if got := transcribeModel(t); got != "large-v3-turbo" {
+			t.Errorf("model = %q, want the ASR_MODEL config value", got)
+		}
+	})
+
+	t.Run("the flag wins over the config value", func(t *testing.T) {
+		t.Setenv("ASR_MODEL", "small")
+		if got := transcribeModel(t, "--model", "tiny"); got != "tiny" {
+			t.Errorf("model = %q, want the --model flag to win", got)
+		}
+	})
+
+	t.Run("neither set leaves the worker default in charge", func(t *testing.T) {
+		t.Setenv("ASR_MODEL", "")
+		if got := transcribeModel(t); got != "" {
+			t.Errorf("model = %q, want empty so the worker script decides", got)
+		}
+	})
+}
