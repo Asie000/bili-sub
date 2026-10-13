@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -90,15 +91,21 @@ func (r *runtime) audioDir() string {
 	return filepath.Join(r.cfg.DataDir, "audio")
 }
 
+// staleAudioAge is how old a leftover file must be before a run deletes it.
+// The scratch dir is shared by every process pointed at the same DataDir, and the
+// serialization that makes sweeping safe is per-process (runtime.opMu): two
+// terminals running a pipeline at once would otherwise have one delete the file
+// the other is transcribing. A file this old belongs to a run that is over -- the
+// fetcher deletes each one within minutes of the video it belongs to.
+const staleAudioAge = 30 * time.Minute
+
 // sweepStaleAudio clears the temporary audio directory before a run starts.
 //
 // Deleting each file as soon as its transcript is stored covers every way a run
 // can end except the one the OS owns: a process that is killed outright
 // (SIGKILL, a closed terminal, a crash, a power cut) never reaches its defers.
 // What such a run leaves is several MB per video, under a name nobody would
-// connect back to a video. This directory is this process's own scratch space
-// and pipeline operations are serialized, so whatever is in it when a run
-// starts belongs to a run that is already over.
+// connect back to a video.
 func (r *runtime) sweepStaleAudio() {
 	entries, err := os.ReadDir(r.audioDir())
 	if err != nil {
@@ -106,6 +113,10 @@ func (r *runtime) sweepStaleAudio() {
 	}
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != audioFileExt {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || time.Since(info.ModTime()) < staleAudioAge {
 			continue
 		}
 		_ = os.Remove(filepath.Join(r.audioDir(), e.Name()))
@@ -120,6 +131,10 @@ func (r *runtime) sweepStaleAudio() {
 // stops the run before it mutates any state (spec §八).
 func (r *runtime) transcribe(ctx context.Context, out io.Writer, lang, model, source string, onProgress func(done, total int)) (transcribeStats, error) {
 	var stats transcribeStats
+	// Normalized for the same reason as in download: `--source` is free text and
+	// the stored search key is normalized, so "search:劳动  法" would otherwise
+	// match nothing and look like "nothing to transcribe".
+	source = pipeline.NormalizeSourceKey(source)
 	// Anything already here is from a run that was killed before it could clean
 	// up: a run that ends normally leaves nothing behind, so this only ever
 	// removes garbage.

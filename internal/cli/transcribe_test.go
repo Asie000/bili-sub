@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"bilibili-sub/internal/asr"
 	"bilibili-sub/internal/bili"
@@ -557,10 +558,24 @@ func TestTranscribeSweepsAudioLeftByAKilledRun(t *testing.T) {
 		t.Fatalf("mkdir audio: %v", err)
 	}
 	// A different bvid on purpose: only the sweep can remove this one, because
-	// the run deletes its own file under a name of its own.
+	// the run deletes its own file under a name of its own. The mtime is wound
+	// back past staleAudioAge: the sweep only trusts a file this old, because the
+	// scratch dir is shared by every process on the same DataDir and a second
+	// run must not delete the audio the first one is transcribing.
 	stale := filepath.Join(audioDir, "BV1killedrun-4242.m4s")
 	if err := os.WriteFile(stale, []byte("half-written audio from a killed run"), 0o644); err != nil {
 		t.Fatalf("write stale audio: %v", err)
+	}
+	oldAge := time.Now().Add(-staleAudioAge - time.Minute)
+	if err := os.Chtimes(stale, oldAge, oldAge); err != nil {
+		t.Fatalf("age the stale audio: %v", err)
+	}
+
+	// A fresh leftover, the one the age guard exists to protect: another run
+	// could have written it a moment ago and still be using it.
+	fresh := filepath.Join(audioDir, "BV1otherrun-4243.m4s")
+	if err := os.WriteFile(fresh, []byte("audio another run may still be using"), 0o644); err != nil {
+		t.Fatalf("write fresh audio: %v", err)
 	}
 
 	overrideAudioPipeline(t, newAudioServer(t).URL)
@@ -574,7 +589,9 @@ func TestTranscribeSweepsAudioLeftByAKilledRun(t *testing.T) {
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Errorf("audio from a killed run survived the next run: %s", stale)
 	}
-	assertNoAudioLeft(t, dir)
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh audio was swept: %s (another run could still be using it)", fresh)
+	}
 }
 
 // assertNoAudioLeft fails when anything is still in the temporary audio dir.

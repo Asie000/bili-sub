@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -42,7 +43,7 @@ func newExportCmd() *cobra.Command {
 				return err
 			}
 			defer rt.close()
-			_, err = rt.export(cmd.OutOrStdout(), cmd.ErrOrStderr(), formats, includeExported, nil)
+			_, err = rt.export(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), formats, includeExported, nil)
 			return err
 		},
 	}
@@ -56,7 +57,7 @@ func newExportCmd() *cobra.Command {
 // skip notices. The exported state records what an earlier run already
 // delivered; includeExported opts back into re-packaging those rows, e.g. to
 // rebuild a lost archive. On success every packaged video is marked exported.
-func (r *runtime) export(out, warn io.Writer, formats []string, includeExported bool, onProgress func(done, total int)) (string, error) {
+func (r *runtime) export(ctx context.Context, out, warn io.Writer, formats []string, includeExported bool, onProgress func(done, total int)) (string, error) {
 	st, err := r.store()
 	if err != nil {
 		return "", err
@@ -103,6 +104,12 @@ func (r *runtime) export(out, warn io.Writer, formats []string, includeExported 
 	docs := make(map[string]*ir.Document, len(videos))
 	keyIDs := make(map[string]int64, len(videos))
 	for _, v := range videos {
+		// Packing is local work, but a big archive still takes long enough that a
+		// Ctrl+C should stop it rather than let it finish writing a zip the user
+		// no longer wants.
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		_, _, irJSON, err := st.GetTranscript(v.ID)
 		// A locked or half-written row must not abort the whole archive: warn
 		// with the bvid and skip that one video.

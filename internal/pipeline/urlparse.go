@@ -96,6 +96,18 @@ func SplitSearchKey(key string) (keyword string, ok bool) {
 	return keyword, true
 }
 
+// NormalizeSourceKey applies the same normalization the writing side applies, so
+// `--source "search:劳动  法"` finds the rows stored under `search:劳动 法`
+// instead of silently matching none and printing "先运行 probe". Keys for the
+// other kinds are ids, so they only lose surrounding whitespace.
+func NormalizeSourceKey(key string) string {
+	key = strings.TrimSpace(key)
+	if keyword, ok := SplitSearchKey(key); ok {
+		return SearchKey(keyword)
+	}
+	return key
+}
+
 var (
 	reBvid = regexp.MustCompile(`BV[0-9A-Za-z]{10}`)
 	// Search links carry the keyword, so they must be tested before the bvid
@@ -137,6 +149,9 @@ func ParseURL(raw string) (SourceKind, string, error) {
 	// at -- 54 videos instead of 5, with no error and no warning.
 	if keyword, ok := parseSearchURL(s); ok {
 		return KindSearch, SearchKey(keyword), nil
+	}
+	if strings.Contains(s, "search.bilibili.com") {
+		return 0, "", fmt.Errorf("识别到搜索链接，但没能取出关键词：%q（请检查 keyword= 后面是否有内容）", raw)
 	}
 	if isSeasonLike(s) {
 		key, err := parseSeasonKey(raw)
@@ -278,6 +293,11 @@ func ParseURLForKind(raw string, kind SourceKind) (string, error) {
 		// user can paste either one.
 		if keyword, ok := parseSearchURL(s); ok {
 			return SearchKey(keyword), nil
+		}
+		// A search link whose keyword could not be read is an error, not a
+		// keyword: searching for the URL text itself is never what was meant.
+		if strings.Contains(s, "search.bilibili.com") {
+			return "", fmt.Errorf("识别到搜索链接，但没能取出关键词：%q（请检查 keyword= 后面是否有内容）", raw)
 		}
 		if keyword := NormalizeKeyword(s); keyword != "" {
 			return SearchKey(keyword), nil

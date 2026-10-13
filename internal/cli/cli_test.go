@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"testing"
 
 	"bilibili-sub/internal/bili"
+	"bilibili-sub/internal/export"
 	"bilibili-sub/internal/filename"
 	"bilibili-sub/internal/ir"
 	"bilibili-sub/internal/pipeline"
@@ -1048,5 +1050,93 @@ func TestProbeSingleVideoWithoutASeasonStaysQuiet(t *testing.T) {
 	}
 	if stats.Hint != "" {
 		t.Errorf("stats.Hint = %q, want empty when the video belongs to no 合集", stats.Hint)
+	}
+}
+
+// TestSearchLimitRejectsNegatives: a negative --limit used to mean "unlimited"
+// in silence, because the check is `limit > 0` -- one dropped minus sign away
+// from walking a thousand results and a thousand view calls.
+func TestSearchLimitRejectsNegatives(t *testing.T) {
+	for _, args := range [][]string{
+		{"probe", "--kind", "search", "--limit", "-1", "kw"},
+		{"run", "--kind", "search", "--limit", "-1", "kw"},
+	} {
+		out, err := executeOut(t, args...)
+		if err == nil {
+			t.Errorf("%v: no error, want --limit < 0 rejected\n%s", args, out)
+		}
+	}
+}
+
+// TestDownloadReportsCancellationNotFailures pins the report of a run the user
+// stopped. Every item the pool never reached carries the cancellation, and
+// printing a "失败" line per remaining video (then "共 N，成功 0，失败 N") describes
+// failures that never happened -- the rows are untouched, which is the point.
+func TestDownloadReportsCancellationNotFailures(t *testing.T) {
+	rt := newTestRuntime(t)
+	defer rt.close()
+	st, err := rt.store()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	for i, bvid := range []string{"BV1aaaa1111a", "BV1bbbb2222b"} {
+		v := store.Video{Bvid: bvid, Cid: int64(100 + i), Author: "up", Title: "t", State: store.StateDownloadable, Lang: "zh"}
+		if _, err := st.UpsertVideo(&v); err != nil {
+			t.Fatalf("seed %s: %v", bvid, err)
+		}
+	}
+	overrideDownloader(t, "http://127.0.0.1:1/player")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancelled before anything starts, so every item reports ctx.Err() -- the
+	// same shape a Ctrl+C leaves behind mid-run.
+	cancel()
+
+	var out strings.Builder
+	stats, err := rt.downloadSubtitles(ctx, &out, "zh", []string{export.FormatSRT}, "", nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	got := out.String()
+	if strings.Contains(got, "失败") {
+		t.Errorf("output = %q, want no failure lines for videos that were never tried", got)
+	}
+	if !strings.Contains(got, "已取消") {
+		t.Errorf("output = %q, want it to say the run was cancelled", got)
+	}
+	if stats.Failed != 0 {
+		t.Errorf("stats.Failed = %d, want 0: nothing failed, the run was stopped", stats.Failed)
+	}
+	rows, err := st.ListVideosFiltered(store.StateDownloadable, "")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Errorf("downloadable rows = %d, want 2 untouched by the cancelled run", len(rows))
+	}
+}
+
+// TestSourceFlagMatchesTheNormalizedSearchKey: the probe writes the source key
+// normalized ("search:劳动 法", one space), but --source is free text. Without
+// normalizing the read side too, "search:劳动  法" or " search:劳动法 " matches
+// nothing and the run reports "没有需要转写的无字幕视频" -- which reads like an empty
+// source rather than a mistyped key.
+func TestSourceFlagMatchesTheNormalizedSearchKey(t *testing.T) {
+	rt := newTestRuntime(t)
+	defer rt.close()
+	seedVideoRow(t, rt.cfg.DataDir, store.Video{
+		Bvid: "BV1nosubtitle", Cid: 88, Author: "某UP", Title: "无字幕视频",
+		State: store.StateNoSubtitle, SourceKey: "search:劳动 法",
+	})
+	overrideAudioPipeline(t, newAudioServer(t).URL)
+	overrideASRBackend(t, &fakeASR{segments: []ir.Segment{{StartMs: 0, EndMs: 900, Text: "转写内容"}}}, nil)
+
+	var out strings.Builder
+	stats, err := rt.transcribe(context.Background(), &out, "zh", "", " search:劳动  法 ", nil)
+	if err != nil {
+		t.Fatalf("transcribe: %v\n%s", err, out.String())
+	}
+	if stats.OK != 1 {
+		t.Fatalf("stats = %+v, output = %q, want the row found through the messy key", stats, out.String())
 	}
 }

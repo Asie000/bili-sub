@@ -120,6 +120,10 @@ func legProgressSink(fn func(done, total int)) legProgress {
 }
 
 func (r *runtime) download(ctx context.Context, out io.Writer, lang string, formats []string, transcribe bool, asrLang, model, source string, onProgress legProgress) (downloadStats, error) {
+	// Normalize here rather than at each flag: the web's download seam and `run`
+	// reach this through the same door, so all three get the same source keys the
+	// probe wrote. Idempotent, so transcribe normalizing again is harmless.
+	source = pipeline.NormalizeSourceKey(source)
 	stats, err := r.downloadSubtitles(ctx, out, lang, formats, source, tagLeg(onProgress, opDownload))
 	if err != nil {
 		return stats, err
@@ -190,6 +194,12 @@ func (r *runtime) downloadSubtitles(ctx context.Context, out io.Writer, lang str
 	for i, res := range results {
 		v := videos[i]
 		if res.Err != nil || res.Value == nil {
+			// A cancelled run leaves every item it never reached with ctx.Err().
+			// Reporting those as failures would print a hundred lines about a
+			// hundred videos that were never tried.
+			if errors.Is(res.Err, context.Canceled) {
+				continue
+			}
 			failCount++
 			if res.Err != nil {
 				fmt.Fprintf(out, "第 %d 项 %s 失败：%v\n", i+1, v.Bvid, res.Err)
@@ -202,13 +212,18 @@ func (r *runtime) downloadSubtitles(ctx context.Context, out io.Writer, lang str
 		okCount++
 		fmt.Fprintf(out, "第 %d 项 %s 已下载（%s）\n", i+1, v.Bvid, res.Value.Lang)
 	}
-	emit(stats.Total, stats.Total)
 	stats.Fetched = okCount
 	stats.Failed = failCount
-	fmt.Fprintf(out, "下载完成：共 %d，成功 %d，失败 %d，输出目录 %s\n", stats.Total, okCount, failCount, dir)
-	if ctx.Err() != nil {
-		return stats, ctx.Err()
+	if err := ctx.Err(); err != nil {
+		// Reporting "下载完成：共 100，成功 2，失败 98" for a run the user stopped
+		// describes failures that did not happen, and the final tick would push
+		// the web progress bar to 100%. The rows are untouched (the per-item
+		// state writes are guarded on ctx), so say what actually happened.
+		fmt.Fprintf(out, "已取消：完成 %d/%d，其余视频保持原状态。\n", okCount, stats.Total)
+		return stats, err
 	}
+	emit(stats.Total, stats.Total)
+	fmt.Fprintf(out, "下载完成：共 %d，成功 %d，失败 %d，输出目录 %s\n", stats.Total, okCount, failCount, dir)
 	return stats, nil
 }
 

@@ -190,6 +190,7 @@ func (e *Enumerator) resolveAll(ctx context.Context, bvids []string) ([]*bili.Vi
 // it is, the season_id which season.
 func (e *Enumerator) EnumerateSeason(ctx context.Context, mid, seasonID string) ([]*bili.VideoInfo, error) {
 	var videos []*bili.VideoInfo
+	seen := map[string]bool{}
 	for pn := 1; ; pn++ {
 		var resp struct {
 			Archives []struct {
@@ -214,11 +215,28 @@ func (e *Enumerator) EnumerateSeason(ctx context.Context, mid, seasonID string) 
 		}
 		bvids := make([]string, 0, len(resp.Archives))
 		for _, a := range resp.Archives {
+			if a.Bvid == "" || seen[a.Bvid] {
+				continue
+			}
+			seen[a.Bvid] = true
 			bvids = append(bvids, a.Bvid)
+		}
+		if len(bvids) == 0 {
+			// A page of nothing but repeats means the listing stopped making
+			// progress; asking for more pages would just loop.
+			break
 		}
 		infos, err := e.resolveAll(ctx, bvids)
 		if err != nil {
 			return nil, err
+		}
+		if len(infos) == 0 {
+			// The page had archives but none resolved (all deleted). page.total
+			// counts archives, so len(videos) >= total can never become true here,
+			// and the remaining stop condition would be "the server answers an
+			// out-of-range page with an empty array" -- an assumption worth not
+			// betting a request loop on. Stop on "this page added nothing" instead.
+			break
 		}
 		videos = append(videos, infos...)
 		if resp.Page.Total > 0 && len(videos) >= resp.Page.Total {
@@ -229,8 +247,11 @@ func (e *Enumerator) EnumerateSeason(ctx context.Context, mid, seasonID string) 
 }
 
 // EnumerateSearch lists a keyword's video hits, stopping at limit resolved videos
-// (0 means no limit). The cap is a promise about how many rows one run creates,
-// so it cuts the list rather than rounding up to a page boundary.
+// (0 means no limit). The cap is a promise about how many videos one run resolves
+// before it stops, so the cut happens before the view calls rather than after: a
+// page is 20 hits, and resolving the whole page to then keep 3 spends 17 requests
+// on rows nothing will use. limit counts videos, not rows -- a multi-P video still
+// expands into several rows when the caller stores it.
 //
 // The search response's own title is ignored on purpose: it can carry <em
 // class="keyword"> highlight markup, and every hit needs a view call anyway for
@@ -242,6 +263,9 @@ func (e *Enumerator) EnumerateSearch(ctx context.Context, keyword string, limit 
 		return nil, err
 	}
 	var videos []*bili.VideoInfo
+	// A keyword's pages can repeat a hit (the ranking is not a stable order), and
+	// a repeat would be probed twice and printed twice before the DB dedupes it.
+	seen := map[string]bool{}
 	for page := 1; ; page++ {
 		params, err := signer.Sign(map[string]string{
 			"search_type": "video",
@@ -268,7 +292,18 @@ func (e *Enumerator) EnumerateSearch(ctx context.Context, keyword string, limit 
 		}
 		bvids := make([]string, 0, len(resp.Result))
 		for _, r := range resp.Result {
+			if r.Bvid == "" || seen[r.Bvid] {
+				continue
+			}
+			seen[r.Bvid] = true
 			bvids = append(bvids, r.Bvid)
+		}
+		if limit > 0 {
+			// Trim before resolving: the limit must cut requests too, not just
+			// results.
+			if remaining := limit - len(videos); remaining < len(bvids) {
+				bvids = bvids[:remaining]
+			}
 		}
 		infos, err := e.resolveAll(ctx, bvids)
 		if err != nil {
@@ -276,7 +311,7 @@ func (e *Enumerator) EnumerateSearch(ctx context.Context, keyword string, limit 
 		}
 		videos = append(videos, infos...)
 		if limit > 0 && len(videos) >= limit {
-			return videos[:limit], nil
+			return videos, nil
 		}
 		if resp.NumPages > 0 && page >= resp.NumPages {
 			break

@@ -45,7 +45,7 @@ type VideoPage struct {
 // Progress is one progress tick for a long-running operation, streamed as an
 // SSE `progress` event.
 type Progress struct {
-	Op    string `json:"op"` // "probe" | "download" | "export"
+	Op    string `json:"op"` // "probe" | "download" | "transcribe" | "export"
 	Done  int    `json:"done"`
 	Total int    `json:"total"`
 }

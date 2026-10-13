@@ -65,7 +65,7 @@ function log(message) {
   box.scrollTop = box.scrollHeight;
 }
 
-// OP_LABELS names the three long-running operations for the progress panel.
+// OP_LABELS names the long-running operations for the progress panel.
 const OP_LABELS = { probe: "探测", download: "获取字幕", transcribe: "转写", export: "导出" };
 
 // showProgress fills the persistent panel under the header. A tick with total 0

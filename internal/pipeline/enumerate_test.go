@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"bilibili-sub/internal/bili"
@@ -89,6 +90,25 @@ func TestSearchKeyNormalizesWhitespace(t *testing.T) {
 		keyword, ok := SplitSearchKey(SearchKey(in))
 		if !ok || keyword == "" {
 			t.Errorf("SplitSearchKey(%q) = (%q,%v), want the keyword back", SearchKey(in), keyword, ok)
+		}
+	}
+}
+
+// TestNormalizeSourceKey pins that the read side (\`--source\`) sees the same key
+// the write side (probe) stored: a search key is normalized, and everything else
+// is an id that only loses whitespace.
+func TestNormalizeSourceKey(t *testing.T) {
+	cases := map[string]string{
+		"search:劳动法":   "search:劳动法",
+		" search:劳动法 ": "search:劳动法",
+		"search:劳动  法": "search:劳动 法",
+		"453013730":    "453013730",
+		"season:1:2":   "season:1:2",
+		"BV1uv411q7Mv": "BV1uv411q7Mv",
+	}
+	for in, want := range cases {
+		if got := NormalizeSourceKey(in); got != want {
+			t.Errorf("NormalizeSourceKey(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -489,7 +509,14 @@ func TestEnumerateSearch(t *testing.T) {
 	}))
 	defer navSrv.Close()
 
-	viewSrv := httptest.NewServer(http.HandlerFunc(viewHandler))
+	// Counting the view calls is the point of the limit test: the cut has to
+	// happen before them, not after. A page is 20 hits, so a limit of 3 that
+	// resolves the whole page first spends 20 requests and keeps 3.
+	var viewHits int32
+	viewSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&viewHits, 1)
+		viewHandler(w, r)
+	}))
 	defer viewSrv.Close()
 
 	var mu sync.Mutex
@@ -550,6 +577,9 @@ func TestEnumerateSearch(t *testing.T) {
 	mu.Lock()
 	stopped := append([]string(nil), pages...)
 	mu.Unlock()
+	if n := atomic.LoadInt32(&viewHits); n != 3 {
+		t.Errorf("view calls = %d, want exactly 3: the limit must cut the requests too, not just the results", n)
+	}
 	if !reflect.DeepEqual(stopped, []string{"1", "2"}) {
 		t.Fatalf("search pages = %v, want [1 2]: the limit was reached on page 2", stopped)
 	}
@@ -598,6 +628,107 @@ func TestEnumerateSearchUnlimited(t *testing.T) {
 	defer mu.Unlock()
 	if !reflect.DeepEqual(pages, []string{"1", "2"}) {
 		t.Fatalf("search pages = %v, want [1 2]: stop at the first empty page", pages)
+	}
+}
+
+// TestResolveAllSkipsGoneVideosButFailsOnOtherErrors pins the two branches of the
+// listing loop every source kind shares: a deleted video (-404) is skipped so one
+// gone entry does not fail a whole 合集, while anything else is a real error and
+// stops the run rather than being reported as "the source has no videos".
+func TestResolveAllSkipsGoneVideosButFailsOnOtherErrors(t *testing.T) {
+	// withRejected adds a third item that fails with -400; without it the page
+	// only has a gone video and a live one, which is what the skip case wants.
+	seasonSrv := func(t *testing.T, withRejected bool) *httptest.Server {
+		t.Helper()
+		listing := `{"code":0,"message":"0","data":{"archives":[{"bvid":"BV1gone"},{"bvid":"BV1live"}],"page":{"page_num":1,"page_size":30,"total":2}}}`
+		if withRejected {
+			listing = `{"code":0,"message":"0","data":{"archives":[{"bvid":"BV1gone"},{"bvid":"BV1live"},{"bvid":"BV1rejected"}],"page":{"page_num":1,"page_size":30,"total":3}}}`
+		}
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/season":
+				_, _ = w.Write([]byte(listing))
+			case "/view":
+				switch r.URL.Query().Get("bvid") {
+				case "BV1gone":
+					// Bilibili reports a deleted video as code -404.
+					_, _ = w.Write([]byte(`{"code":-404,"message":"啥都木有"}`))
+				case "BV1rejected":
+					_, _ = w.Write([]byte(`{"code":-400,"message":"请求错误"}`))
+				default:
+					fmt.Fprintf(w, `{"code":0,"message":"0","data":{"bvid":%q,"cid":100,"title":"title-%s","pages":[{"cid":100,"page":1,"part":"P1"}]}}`,
+						r.URL.Query().Get("bvid"), r.URL.Query().Get("bvid"))
+				}
+			default:
+				t.Errorf("unexpected request path %q", r.URL.Path)
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+	}
+
+	t.Run("gone video is skipped", func(t *testing.T) {
+		srv := seasonSrv(t, false)
+		defer srv.Close()
+		e := NewEnumerator(bili.NewClient("", nopLimiter{}))
+		e.SeasonBaseURL = srv.URL + "/season"
+		e.ViewBaseURL = srv.URL + "/view"
+		videos, err := e.EnumerateSeason(context.Background(), "1", "2")
+		if err != nil {
+			t.Fatalf("EnumerateSeason: %v", err)
+		}
+		if len(videos) != 1 || videos[0].Bvid != "BV1live" {
+			t.Fatalf("videos = %+v, want only the live one", videos)
+		}
+	})
+
+	t.Run("other errors stop the run", func(t *testing.T) {
+		srv := seasonSrv(t, true)
+		defer srv.Close()
+		e := NewEnumerator(bili.NewClient("", nopLimiter{}))
+		e.SeasonBaseURL = srv.URL + "/season"
+		e.ViewBaseURL = srv.URL + "/view"
+		if _, err := e.EnumerateSeason(context.Background(), "1", "2"); err == nil {
+			t.Fatal("want the -400 to fail the run, not be reported as an empty source")
+		}
+	})
+}
+
+// TestEnumerateSeasonStopsWhenAPageAddsNothing pins the paginated-stop fallback.
+// page.total counts archives, so a 合集 whose videos are all deleted can never
+// reach len(videos) >= total, and the run used to rely on the server answering an
+// out-of-range page with an empty array -- an assumption nothing pinned. A page
+// that resolves to nothing is the run's own evidence that it is over.
+func TestEnumerateSeasonStopsWhenAPageAddsNothing(t *testing.T) {
+	var mu sync.Mutex
+	var pages []string
+	seasonSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		pages = append(pages, r.URL.Query().Get("page_num"))
+		mu.Unlock()
+		// The same full page, forever: whatever breaks must come from the client.
+		_, _ = w.Write([]byte(`{"code":0,"message":"0","data":{"archives":[{"bvid":"BV1gone"}],"page":{"page_num":1,"page_size":30,"total":100}}}`))
+	}))
+	defer seasonSrv.Close()
+	viewSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":-404,"message":"啥都木有"}`))
+	}))
+	defer viewSrv.Close()
+
+	e := NewEnumerator(bili.NewClient("", nopLimiter{}))
+	e.SeasonBaseURL = seasonSrv.URL
+	e.ViewBaseURL = viewSrv.URL
+
+	videos, err := e.EnumerateSeason(context.Background(), "1", "2")
+	if err != nil {
+		t.Fatalf("EnumerateSeason: %v", err)
+	}
+	if len(videos) != 0 {
+		t.Fatalf("videos = %d, want 0", len(videos))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(pages) != 1 {
+		t.Errorf("listing pages = %v, want exactly 1: a page that resolves to nothing must end the run", pages)
 	}
 }
 

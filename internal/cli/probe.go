@@ -67,7 +67,7 @@ func newProbeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			limit, err := cmd.Flags().GetInt("limit")
+			limit, err := searchLimit(cmd)
 			if err != nil {
 				return err
 			}
@@ -84,6 +84,20 @@ func newProbeCmd() *cobra.Command {
 	cmd.Flags().Bool("force", false, "重新探测已完成的视频（fetched/transcribed/exported）")
 	cmd.Flags().Int("limit", pipeline.DefaultSearchLimit, "搜索来源最多取多少条（0 = 不限）；其他来源忽略此项")
 	return cmd
+}
+
+// searchLimit validates the --limit flag. Negative used to mean "unlimited" in
+// silence, because the check is `limit > 0` -- one dropped minus sign away from
+// walking a thousand results and a thousand view calls.
+func searchLimit(cmd *cobra.Command) (int, error) {
+	limit, err := cmd.Flags().GetInt("limit")
+	if err != nil {
+		return 0, err
+	}
+	if limit < 0 {
+		return 0, errors.New("--limit 不能为负数（0 表示不限）")
+	}
+	return limit, nil
 }
 
 // probeStats is what one probe run learned about its source. Both the CLI
@@ -236,8 +250,12 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 			stats.NoSubtitle++
 			return "无字幕"
 		default:
-			// Either ProbeVideo failed or the run was cancelled before this
-			// video was picked up.
+			// Either ProbeVideo failed, or the run was cancelled before this video
+			// was picked up. A cancelled run must not report the videos it never
+			// reached as failures.
+			if ctx.Err() != nil {
+				return "已取消"
+			}
 			stats.Failed++
 			return "失败"
 		}

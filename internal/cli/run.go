@@ -51,7 +51,7 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			limit, err := cmd.Flags().GetInt("limit")
+			limit, err := searchLimit(cmd)
 			if err != nil {
 				return err
 			}
@@ -113,7 +113,7 @@ func (r *runtime) run(ctx context.Context, out io.Writer, rawURL, kindSpec, lang
 
 	_, asrErr := r.download(ctx, out, lang, formats, transcribe, asrLang, model, source, legProgressSink(onProgress))
 
-	if _, err := r.export(out, out, formats, false, onProgress); err != nil {
+	if _, err := r.export(ctx, out, out, formats, false, onProgress); err != nil {
 		return err
 	}
 	if asrErr != nil {
