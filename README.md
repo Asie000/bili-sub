@@ -92,7 +92,7 @@ uv pip install --python .asr-venv/Scripts/python.exe faster-whisper "av<19"
 - **合集也能抓**：直接粘合集链接（`space.bilibili.com/<mid>/channel/collectiondetail?sid=<sid>`，或新的 `.../lists/<sid>?type=season`）。粘**单视频**链接时，若它属于某个合集，会提示「这条视频属于合集《X》，共 N 条」并给出可粘贴的合集链接（命令行和网页都会提示；默认**不**自动把 31 条都抓下来）。视频选集（series）暂不支持，会明确报错。
   - ⚠️ 同一批视频若先用别的来源（如 UP主空间）抓过，再按合集抓会**把行的来源键改成合集键**；之后按旧键 `--source <mid>` 过滤会查不到（不报错，返回 0 条）。
 - **也能按关键词搜**：`bili-sub probe --kind search --limit 20 劳动法`（网页端来源类型选「搜索关键词」）。搜索是**登录接口**。一个词最多能出 1000 条、每条还要再查一次，所以默认**只取 50 条**，命令行用 `--limit` 改（`--limit 0` = 不限，负数会报错）；**网页端固定取 50 条，目前不可调**。`--source` 的关键词会自动归一化（多余空白不影响匹配）。抓完用 `download --source search:劳动法` 接着跑。
-- **Ctrl+C 是优雅退出**：中途按 Ctrl+C 会停下来、**不把在途视频标成失败**、临时音频文件也删掉（第一次 Ctrl+C 取消，第二次恢复默认行为立刻退出）。中途音频目录 `data/audio/` 由 `transcribe` 每次开始时清理，所以被硬杀（关终端/断电）也不会越积越多。
+- **Ctrl+C 是优雅退出**：中途按 Ctrl+C 会停下来、**不把在途视频标成失败**、临时音频文件也删掉（第一次 Ctrl+C 取消，第二次恢复默认行为立刻退出；非 Windows 上 `SIGTERM`（`docker stop`）同理）。中途音频目录 `data/audio/` 由 `transcribe` 每次开始时清理 30 分钟以上的旧文件，所以被硬杀（关终端/断电）也不会越积越多；只清旧文件是因为两个终端可能共用同一个 `data/`。
 
 ---
 
