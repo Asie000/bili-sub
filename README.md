@@ -71,6 +71,7 @@ uv pip install --python .asr-venv/Scripts/python.exe faster-whisper "av<19"
 
 - `av>=19` 与 faster-whisper 1.2.1 不兼容（`open() got an unexpected keyword argument 'metadata_errors'`），必须 pin `av<19`。
 - 然后在 `.env` 里设 `PYTHON_PATH=<仓库>\.asr-venv\Scripts\python.exe`（系统默认 Python 若是 3.13+ 会装不上 faster-whisper）。
+- 不设 `PYTHON_PATH` 时按 `python` → `python3` 的顺序找解释器（Windows 一般只有 `python`，Linux/macOS 往往只有 `python3`）；两个都找不到会**直接报「找不到 Python 解释器」并告诉你去设 `PYTHON_PATH`**，而不是含含糊糊地说「无法 import faster_whisper」。写了绝对路径就完全按你写的来，不会再替你换。
 - ⚠️ 切勿把 venv 放进 `data/`：`bili-sub reset --yes` 执行的是 `os.RemoveAll(dataDir)`，会把整个 Python 环境和已装依赖一起删掉。
 - GPU 可选：`uv pip install --python .asr-venv/Scripts/python.exe nvidia-cublas-cu12 nvidia-cudnn-cu12` 后 worker 自动走 `cuda/float16`；没装 CUDA 运行库也不影响，会自动降级 `cpu/int8`。（同一台 4060、同一段 268 秒音频、`small` 模型：GPU float16 24 秒，CPU int8 8 分 16 秒，约 20 倍。）
 - **模型怎么选**（实测，RTX 4060 Laptop，同一段 268 秒中文音频）：

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"bilibili-sub/internal/filename"
 	"bilibili-sub/internal/ir"
-	"bilibili-sub/internal/util"
 )
 
 func TestPack(t *testing.T) {
@@ -49,7 +49,7 @@ func TestPack(t *testing.T) {
 		got[f.Name] = true
 	}
 	for key, d := range docs {
-		stem := util.SanitizeSubtitleName(d.Author, d.Title, d.Bvid)
+		stem := filename.SanitizeSubtitleName(d.Author, d.Title, d.Bvid)
 		for _, format := range []string{"srt", "txt"} {
 			want := wantPrefix + stem + "." + format
 			if !got[want] {
@@ -71,7 +71,7 @@ func TestPackRejectsDuplicateEntryName(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Pack accepted duplicate entries, zip=%s", z)
 	}
-	stem := util.SanitizeSubtitleName("同一UP", "同名", "BV1")
+	stem := filename.SanitizeSubtitleName("同一UP", "同名", "BV1")
 	if !strings.Contains(err.Error(), stem) {
 		t.Fatalf("error does not name the duplicate stem %q: %v", stem, err)
 	}
@@ -111,7 +111,7 @@ func TestPackDifferentAuthorsNoCollision(t *testing.T) {
 	}
 	base := "20261008-2/"
 	for _, author := range []string{"UP甲", "UP乙"} {
-		want := base + util.SanitizeSubtitleName(author, "同名", "BV1") + ".srt"
+		want := base + filename.SanitizeSubtitleName(author, "同名", "BV1") + ".srt"
 		found := false
 		for _, f := range r.File {
 			if f.Name == want {

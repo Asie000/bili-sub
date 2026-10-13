@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"bilibili-sub/internal/bili"
+	"bilibili-sub/internal/filename"
 	"bilibili-sub/internal/ir"
 	"bilibili-sub/internal/store"
-	"bilibili-sub/internal/util"
 )
 
 // subtitleBodyJSON is the shape B站 serves at subtitle_url: a bare {body:[...]}
@@ -122,7 +122,7 @@ func TestDownloaderFetchSubtitle(t *testing.T) {
 		t.Errorf("Referer=%q want https://www.bilibili.com", gotReferer)
 	}
 
-	srtPath := filepath.Join(out, util.SanitizeSubtitleName(v.Author, v.Title, v.Bvid)+".srt")
+	srtPath := filepath.Join(out, filename.SanitizeSubtitleName(v.Author, v.Title, v.Bvid)+".srt")
 	srtBytes, err := os.ReadFile(srtPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", srtPath, err)
@@ -194,7 +194,7 @@ func TestDownloaderMultiPageFilenameSuffix(t *testing.T) {
 	if _, err := d.FetchSubtitle(context.Background(), v, "zh-CN"); err != nil {
 		t.Fatal(err)
 	}
-	plain := util.SanitizeSubtitleName(v.Author, v.Title, v.Bvid)
+	plain := filename.SanitizeSubtitleName(v.Author, v.Title, v.Bvid)
 	if _, err := os.Stat(filepath.Join(out, plain+"_P2.srt")); err != nil {
 		t.Fatalf("expected %s_P2.srt: %v", plain, err)
 	}
@@ -439,7 +439,7 @@ func TestDownloaderNoUsableTrackLeavesStateUnchanged(t *testing.T) {
 			if _, _, _, err := st.GetTranscript(v.ID); err == nil {
 				t.Error("transcript saved on failure")
 			}
-			srtPath := filepath.Join(out, util.SanitizeSubtitleName(v.Author, v.Title, v.Bvid)+".srt")
+			srtPath := filepath.Join(out, filename.SanitizeSubtitleName(v.Author, v.Title, v.Bvid)+".srt")
 			if _, err := os.Stat(srtPath); !os.IsNotExist(err) {
 				t.Errorf("srt written on failure: %v", err)
 			}

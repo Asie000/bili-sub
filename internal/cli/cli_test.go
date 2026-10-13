@@ -17,10 +17,10 @@ import (
 	"testing"
 
 	"bilibili-sub/internal/bili"
+	"bilibili-sub/internal/filename"
 	"bilibili-sub/internal/ir"
 	"bilibili-sub/internal/pipeline"
 	"bilibili-sub/internal/store"
-	"bilibili-sub/internal/util"
 )
 
 // TestRuntimeClientLoadsFullCookieFromSession pins that a session file carrying
@@ -202,7 +202,7 @@ func TestExportWritesZipFromStoredTranscript(t *testing.T) {
 	// Every entry nests under the archive base, and the flat file name carries
 	// the UP主 prefix.
 	base := strings.TrimSuffix(filepath.Base(zips[0]), ".zip") + "/"
-	want := base + util.SanitizeSubtitleName("测试UP主", "测试标题", "BV1uv411q7Mv")
+	want := base + filename.SanitizeSubtitleName("测试UP主", "测试标题", "BV1uv411q7Mv")
 	for _, f := range zr.File {
 		if !strings.HasPrefix(f.Name, want) {
 			t.Errorf("entry %q, want it nested under %q", f.Name, want)
@@ -760,8 +760,8 @@ func TestExportPackagesOnlyNotYetExported(t *testing.T) {
 	}
 	base := strings.TrimSuffix(filepath.Base(zips[0]), ".zip") + "/"
 	wantEntries := map[string]bool{
-		base + util.SanitizeSubtitleName("UP甲", "源一", "BV1aaaa1111a") + ".srt": true,
-		base + util.SanitizeSubtitleName("UP乙", "源二", "BV1bbbb2222b") + ".srt": true,
+		base + filename.SanitizeSubtitleName("UP甲", "源一", "BV1aaaa1111a") + ".srt": true,
+		base + filename.SanitizeSubtitleName("UP乙", "源二", "BV1bbbb2222b") + ".srt": true,
 	}
 	for _, f := range zr.File {
 		if !wantEntries[f.Name] {

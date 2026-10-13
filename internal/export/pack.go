@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"time"
 
+	"bilibili-sub/internal/filename"
 	"bilibili-sub/internal/ir"
-	"bilibili-sub/internal/util"
 )
 
 // Pack renders every document in every format into one zip inside outDir.
@@ -52,7 +52,7 @@ func Pack(outDir string, now time.Time, docs map[string]*ir.Document, formats []
 		if d == nil {
 			return "", fmt.Errorf("document %q: nil document", key)
 		}
-		stem := util.SanitizeSubtitleName(d.Author, d.Title, d.Bvid)
+		stem := filename.SanitizeSubtitleName(d.Author, d.Title, d.Bvid)
 		for _, format := range formats {
 			entry := base + "/" + stem + "." + format
 			if _, dup := written[entry]; dup {

@@ -16,6 +16,32 @@ import (
 // defaultPython is used when NewFasterWhisper is given an empty pythonPath.
 const defaultPython = "python"
 
+// pythonCandidates are the names tried when the default interpreter is not on
+// PATH. Windows ships python.exe and usually has no python3; most Linux and
+// macOS systems are the other way round.
+var pythonCandidates = []string{defaultPython, "python3"}
+
+// resolvePython turns the default interpreter name into one that actually exists.
+// Only the name this code chose itself is up for substitution: any other value is
+// the user saying exactly which interpreter to run, and silently running a
+// different one would hide a typo in .env behind a mysteriously different Python.
+func resolvePython(pythonPath string) string {
+	if pythonPath != "" && pythonPath != defaultPython {
+		return pythonPath
+	}
+	for _, candidate := range pythonCandidates {
+		if _, err := exec.LookPath(candidate); err == nil {
+			return candidate
+		}
+	}
+	// Nothing found: keep the original so the error names what was asked for
+	// rather than something the user never typed.
+	if pythonPath == "" {
+		return defaultPython
+	}
+	return pythonPath
+}
+
 // probeTimeout bounds the readiness probe. Importing faster-whisper pulls in
 // ctranslate2 and the tokenizers runtime, which takes seconds on a cold cache
 // but never minutes; the bound only exists so a wedged interpreter cannot hang
@@ -42,10 +68,7 @@ var _ Backend = (*FasterWhisper)(nil)
 // NewFasterWhisper builds a backend. pythonPath defaults to "python"; model is
 // the default model for requests that leave Options.Model empty.
 func NewFasterWhisper(pythonPath, scriptPath, model string) *FasterWhisper {
-	if pythonPath == "" {
-		pythonPath = defaultPython
-	}
-	return &FasterWhisper{pythonPath: pythonPath, scriptPath: scriptPath, model: model}
+	return &FasterWhisper{pythonPath: resolvePython(pythonPath), scriptPath: scriptPath, model: model}
 }
 
 // Name identifies this backend in the transcripts table.
@@ -123,6 +146,13 @@ func (f *FasterWhisper) probeEngine() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
+	// Distinguish "there is no interpreter" from "the interpreter is missing
+	// faster-whisper". Running the probe at all when the binary does not exist
+	// reports the second, less useful, of the two.
+	if _, err := exec.LookPath(f.pythonPath); err != nil {
+		return fmt.Errorf("asr: 找不到 Python 解释器 %q（试过 %s）：请在 .env 里用 PYTHON_PATH 指向你的 Python 3.9-3.12；%w",
+			f.pythonPath, strings.Join(pythonCandidates, " / "), err)
+	}
 	probe := exec.CommandContext(ctx, f.pythonPath, "-c", "import faster_whisper")
 	output, err := probe.CombinedOutput()
 	if err == nil {

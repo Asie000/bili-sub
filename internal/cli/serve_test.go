@@ -14,6 +14,7 @@ import (
 
 	"bilibili-sub/internal/bili"
 	"bilibili-sub/internal/config"
+	"bilibili-sub/internal/ir"
 	"bilibili-sub/internal/server"
 	"bilibili-sub/internal/store"
 )
@@ -316,5 +317,61 @@ func TestServeProbeSeamCarriesTheSeasonHint(t *testing.T) {
 		if !strings.Contains(summary.Hint, want) {
 			t.Errorf("summary.Hint = %q, want it to contain %q", summary.Hint, want)
 		}
+	}
+}
+
+// TestServeDownloadSeamTagsTheTranscribeLeg pins that the ASR leg's ticks are not
+// reported as more downloads. The browser labels its progress panel from this op,
+// so an untagged tick tells the user 获取字幕 while the machine is transcribing --
+// and rewrites the download leg's counts with its own.
+func TestServeDownloadSeamTagsTheTranscribeLeg(t *testing.T) {
+	rt := newTestRuntime(t)
+	defer rt.close()
+	// Seed into the runtime's own data dir: newTestRuntime picks its own temp
+	// directory, so a row planted anywhere else is invisible to it.
+	seedVideoRow(t, rt.cfg.DataDir, store.Video{
+		Bvid: "BV1nosubtitle", Cid: 88, Author: "某UP", Title: "无字幕视频",
+		State: store.StateNoSubtitle,
+	})
+	overrideAudioPipeline(t, newAudioServer(t).URL)
+	overrideASRBackend(t, &fakeASR{segments: []ir.Segment{{StartMs: 0, EndMs: 900, Text: "转写内容"}}}, nil)
+
+	st, err := rt.store()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	opts := rt.serveOptions(st, server.NewHub())
+
+	// The seam ticks from its own goroutine (the per-video loops call it
+	// synchronously), so a plain append is enough here.
+	type tick struct {
+		op          string
+		done, total int
+	}
+	var ticks []tick
+	if _, err := opts.Download(context.Background(), "", true, defaultASRLang, "", "",
+		func(p server.Progress) { ticks = append(ticks, tick{p.Op, p.Done, p.Total}) }); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+
+	var transcribe []tick
+	for _, tk := range ticks {
+		switch tk.op {
+		case opTranscribe:
+			transcribe = append(transcribe, tk)
+		case opDownload:
+			t.Errorf("tick %+v: nothing was downloadable here, so the download leg must not report progress", tk)
+		default:
+			t.Errorf("tick %+v: unexpected op", tk)
+		}
+	}
+	if len(transcribe) == 0 {
+		t.Fatalf("ticks = %+v, want the ASR leg's ticks tagged %q rather than %q", ticks, opTranscribe, opDownload)
+	}
+	// The leg reports where it starts and where it ends; the end is what the
+	// panel fills to 100% on.
+	last := transcribe[len(transcribe)-1]
+	if last.done != 1 || last.total != 1 {
+		t.Errorf("last transcribe tick = %+v, want 1/1 for the one video", last)
 	}
 }

@@ -111,7 +111,7 @@ func (r *runtime) run(ctx context.Context, out io.Writer, rawURL, kindSpec, lang
 		return err
 	}
 
-	_, asrErr := r.download(ctx, out, lang, formats, transcribe, asrLang, model, source, onProgress)
+	_, asrErr := r.download(ctx, out, lang, formats, transcribe, asrLang, model, source, legProgressSink(onProgress))
 
 	if _, err := r.export(out, out, formats, false, onProgress); err != nil {
 		return err

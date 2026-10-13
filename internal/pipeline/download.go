@@ -15,9 +15,9 @@ import (
 
 	"bilibili-sub/internal/bili"
 	"bilibili-sub/internal/export"
+	"bilibili-sub/internal/filename"
 	"bilibili-sub/internal/ir"
 	"bilibili-sub/internal/store"
-	"bilibili-sub/internal/util"
 )
 
 // transcriptEngine names the subtitle source for rows in the transcripts table.
@@ -111,7 +111,7 @@ func (d *Downloader) FetchSubtitle(ctx context.Context, v store.Video, lang stri
 	}
 	// Only multi-page videos get the _P{n} suffix, so pages of one video do not
 	// overwrite each other's .srt; it is appended after the bvid bracket.
-	base := util.SanitizeSubtitleName(v.Author, v.Title, v.Bvid)
+	base := filename.SanitizeSubtitleName(v.Author, v.Title, v.Bvid)
 	if v.PageIndex > 1 {
 		base += "_P" + strconv.Itoa(v.PageIndex)
 	}

@@ -239,11 +239,11 @@ IR 始终保留时间轴；**渲染 txt/json/md 时丢弃时间轴**，渲染 sr
   - **语言选择按钮**：探测后列出该视频/当前列表中出现的字幕语言，供选择「拉哪几种语言」；默认按 `中文人工 > 中文AI > 英文 > 其他` 优先取一份，可手动切换。
   - 表格：序号、标题、作者、发布日期、字幕状态（含图标）、字幕语言、是否充电；支持清空、字段设置
   - 操作：一键「获取字幕」「转写无字幕」「导出」；✅ **转写语言选择按钮**（中文 / 英文 / 自动）+ 模型输入框已实现，随请求的 `asr_lang` / `model` 一起发给 `POST /api/download`；留空则回落到 `.env` 的 `ASR_MODEL`
-  - 实时进度：**SSE** 推送（探测/下载/转写进度、成功/跳过/失败计数）；⛔ 转写进度目前复用 `download` 事件，未单独区分
+  - 实时进度：**SSE** 推送（探测/下载/转写进度、成功/跳过/失败计数）；✅ 转写腿的 tick 已单独标为 `transcribe`（`legProgress` 带 op），页面进度条会显示「转写 n/N」而不是「获取字幕 n/N」
 - 后端 API（JSON）：
   - `POST /api/login/sessdata`、`GET /api/login/qrcode`
   - `POST /api/probe`、`POST /api/download`
-  - ⛔ `POST /api/transcribe` 未实现：ASR 目前挂在 `POST /api/download` 的 `{"transcribe":true}` 上，可带 `asr_lang` / `model`
+  - ⛔ `POST /api/transcribe` 仍未实现（也暂无必要）：ASR 挂在 `POST /api/download` 的 `{"transcribe":true}` 上，可带 `asr_lang` / `model`（搜索的条数上限不在这个接口上，它固定用 `DefaultSearchLimit`）
   - `POST /api/download` 的返回：转写腿失败但已做过事（有计数）时返回 **200 + `error` 字段**，而不是 500——否则页面会丢掉成功计数、看起来像什么都没发生
   - `POST /api/export`
   - `GET /api/videos`、`GET /api/stats`

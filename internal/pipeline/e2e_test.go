@@ -20,9 +20,9 @@ import (
 
 	"bilibili-sub/internal/bili"
 	"bilibili-sub/internal/export"
+	"bilibili-sub/internal/filename"
 	"bilibili-sub/internal/ir"
 	"bilibili-sub/internal/store"
-	"bilibili-sub/internal/util"
 )
 
 // Fixture of the fake B站 video: two pages, one usable zh-CN subtitle track.
@@ -215,7 +215,7 @@ func TestEndToEndPipelineNoNetwork(t *testing.T) {
 
 		// Only pages after the first get the _P{n} suffix, so both pages must
 		// land in distinct files.
-		stem := util.SanitizeSubtitleName(v.Author, v.Title, v.Bvid)
+		stem := filename.SanitizeSubtitleName(v.Author, v.Title, v.Bvid)
 		if v.PageIndex > 1 {
 			stem += "_P" + strconv.Itoa(v.PageIndex)
 		}
@@ -294,7 +294,7 @@ func TestEndToEndPipelineNoNetwork(t *testing.T) {
 			t.Errorf("zip entry %q is not nested under %q/", name, folder)
 		}
 	}
-	srtEntry := folder + "/" + util.SanitizeSubtitleName(e2eAuthor, e2eTitle, e2eBvid) + ".srt"
+	srtEntry := folder + "/" + filename.SanitizeSubtitleName(e2eAuthor, e2eTitle, e2eBvid) + ".srt"
 	f, ok := entries[srtEntry]
 	if !ok {
 		t.Fatalf("zip entries=%v want %q", zipNames(entries), srtEntry)

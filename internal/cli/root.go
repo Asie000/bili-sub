@@ -18,8 +18,8 @@ import (
 	"bilibili-sub/internal/bili"
 	"bilibili-sub/internal/config"
 	"bilibili-sub/internal/export"
+	"bilibili-sub/internal/filename"
 	"bilibili-sub/internal/store"
-	"bilibili-sub/internal/util"
 )
 
 // NewRootCmd builds the bili-sub command tree. Every command resolves its
@@ -195,7 +195,7 @@ func writeVideosTable(w io.Writer, videos []store.Video, stateFor, langFor func(
 // UP主 prefix plus title is cleaned and the _P{n} suffix only appears for
 // multi-page videos, so pages of one video never collide.
 func pageStem(v store.Video) string {
-	base := util.SanitizeSubtitleName(v.Author, v.Title, v.Bvid)
+	base := filename.SanitizeSubtitleName(v.Author, v.Title, v.Bvid)
 	if v.PageIndex > 1 {
 		base += "_P" + strconv.Itoa(v.PageIndex)
 	}

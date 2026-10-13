@@ -152,10 +152,10 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 				return server.DownloadSummary{}, errOperationBusy
 			}
 			defer r.opMu.Unlock()
-			var progress func(done, total int)
+			var progress legProgress
 			if onProgress != nil {
-				progress = func(done, total int) {
-					onProgress(server.Progress{Op: "download", Done: done, Total: total})
+				progress = func(op string, done, total int) {
+					onProgress(server.Progress{Op: op, Done: done, Total: total})
 				}
 			}
 			// The downloader owns the .srt; export renders the other formats

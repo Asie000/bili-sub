@@ -89,15 +89,45 @@ type downloadStats struct {
 // it is quick and independent, then the ASR leg for whatever is left without a
 // subtitle. The subtitle half keeps a half-downloaded row downloadable; the ASR
 // half only ever sees no_subtitle rows, so the two never contend for a video.
-func (r *runtime) download(ctx context.Context, out io.Writer, lang string, formats []string, transcribe bool, asrLang, model, source string, onProgress func(done, total int)) (downloadStats, error) {
-	stats, err := r.downloadSubtitles(ctx, out, lang, formats, source, onProgress)
+// legProgress reports progress for one leg of a multi-leg run. The subtitle leg
+// and the ASR leg are different operations to the user, so each tick carries the
+// op it belongs to: without it the browser shows "获取字幕 3/5" while the machine
+// is actually transcribing, and the ASR leg's counts overwrite the download's.
+type legProgress func(op string, done, total int)
+
+// Op names for legProgress. They are the strings the SSE progress event carries
+// and the browser maps back to labels.
+const (
+	opDownload   = "download"
+	opTranscribe = "transcribe"
+)
+
+// tagLeg binds one leg's op to a sink, and returns nil for a nil sink so the leg
+// keeps its "no progress wanted" behaviour instead of ticking a stub.
+func tagLeg(sink legProgress, op string) func(done, total int) {
+	if sink == nil {
+		return nil
+	}
+	return func(done, total int) { sink(op, done, total) }
+}
+
+// legProgressSink adapts the plain callback shape the CLI commands use.
+func legProgressSink(fn func(done, total int)) legProgress {
+	if fn == nil {
+		return nil
+	}
+	return func(_ string, done, total int) { fn(done, total) }
+}
+
+func (r *runtime) download(ctx context.Context, out io.Writer, lang string, formats []string, transcribe bool, asrLang, model, source string, onProgress legProgress) (downloadStats, error) {
+	stats, err := r.downloadSubtitles(ctx, out, lang, formats, source, tagLeg(onProgress, opDownload))
 	if err != nil {
 		return stats, err
 	}
 	if !transcribe {
 		return stats, nil
 	}
-	ts, err := r.transcribe(ctx, out, asrLang, model, source, onProgress)
+	ts, err := r.transcribe(ctx, out, asrLang, model, source, tagLeg(onProgress, opTranscribe))
 	stats.Transcribed = ts.OK
 	stats.TranscribeFailed = ts.Failed
 	if err != nil {
