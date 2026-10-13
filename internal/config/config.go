@@ -117,6 +117,11 @@ func (c *Config) set(k, v string) error {
 			return err
 		}
 		c.ASRSimplify = b
+	default:
+		// A misspelled key must not be silently dropped: the value the user
+		// thought they set would otherwise never apply and the failure would
+		// surface as "my login/database disappeared".
+		return fmt.Errorf("未知配置项 %q", k)
 	}
 	return nil
 }

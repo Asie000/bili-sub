@@ -139,6 +139,35 @@ class WorkerProtocolTest(unittest.TestCase):
         self.assertEqual(replies[1]["error"], "")
 
 
+    def test_engine_failure_is_tagged_so_the_go_side_stops_the_run(self):
+        """A model that cannot be loaded is about the engine, not the file.
+
+        Go aborts the run on kind=engine, so it does not download every
+        remaining video's audio only to fail in exactly the same way.
+        """
+
+        def build(name, device):
+            raise RuntimeError("Unable to open file 'smal'")
+
+        self.worker.build_model = build
+
+        replies = run_worker(
+            self.worker,
+            [{"audio": "a.m4s", "model": "smal"}, {"audio": "b.m4s", "model": "smal"}],
+        )
+
+        self.assertEqual([r.get("kind") for r in replies], ["engine", "engine"])
+        self.assertIn("smal", replies[0]["error"])
+
+    def test_a_file_failure_is_not_tagged_as_engine(self):
+        self.worker.build_model = lambda name, device: SelectiveModel()
+
+        replies = run_worker(self.worker, [{"audio": "good.m4s"}, {"audio": "bad.m4s"}])
+
+        self.assertEqual(replies[0]["error"], "")
+        self.assertNotIn("kind", replies[1])
+
+
 class ModelCacheTest(unittest.TestCase):
     """The worker promises to load the model once (spec §九), GPU or CPU."""
 

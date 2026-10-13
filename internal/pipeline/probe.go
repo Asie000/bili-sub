@@ -229,8 +229,12 @@ func fetchAISubtitleURL(ctx context.Context, pr playerRequest, v store.Video) (s
 var langPriority = []string{"zh-Hans", "zh-CN", "zh", "ai-zh", "en", "en-US"}
 
 // PickLang chooses one subtitle track. A non-empty pref wins when it matches a
-// track's lan (case-insensitively, exact match before prefix); otherwise the
-// default priority order decides, falling back to the first available track.
+// track's lan (case-insensitively): exact match first, then the same primary
+// language family. The family fold is what lets `--lang zh-Hans` find a video
+// whose only Chinese track is tagged zh-CN, and `--lang en` find en-US. When the
+// pref names a script (Hans/Hant), a track of the opposite script does not match
+// even though the family does; otherwise the default priority order decides,
+// falling back to the first available track.
 func PickLang(available []bili.SubtitleInfo, pref string) (bili.SubtitleInfo, bool) {
 	if pref != "" {
 		want := strings.ToLower(pref)
@@ -239,10 +243,19 @@ func PickLang(available []bili.SubtitleInfo, pref string) (bili.SubtitleInfo, bo
 				return s, true
 			}
 		}
+		wantFamily, wantScript := langFamily(want), langScript(want)
 		for _, s := range available {
-			if strings.HasPrefix(strings.ToLower(s.Lan), want+"-") {
-				return s, true
+			if langFamily(s.Lan) != wantFamily {
+				continue
 			}
+			// zh-Hans must not silently accept a zh-Hant track, and vice versa:
+			// the family agrees but the script is the opposite of what was asked.
+			if wantScript != "" {
+				if trackScript := langScript(s.Lan); trackScript != "" && trackScript != wantScript {
+					continue
+				}
+			}
+			return s, true
 		}
 		return bili.SubtitleInfo{}, false
 	}
@@ -257,4 +270,25 @@ func PickLang(available []bili.SubtitleInfo, pref string) (bili.SubtitleInfo, bo
 		return available[0], true
 	}
 	return bili.SubtitleInfo{}, false
+}
+
+// langFamily reduces a B站 subtitle language tag to its primary language,
+// folding the AI prefix and any script/region subtags: zh-Hans, zh-CN, zh and
+// ai-zh all belong to "zh", en-US to "en".
+func langFamily(lan string) string {
+	l := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(lan), "ai-"))
+	if i := strings.IndexByte(l, '-'); i > 0 {
+		l = l[:i]
+	}
+	return l
+}
+
+// langScript returns the script subtag (hans/hant) when the tag names one.
+func langScript(lan string) string {
+	l := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(lan), "ai-"))
+	parts := strings.Split(l, "-")
+	if len(parts) >= 2 && (parts[1] == "hans" || parts[1] == "hant") {
+		return parts[1]
+	}
+	return ""
 }

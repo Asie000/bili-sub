@@ -111,6 +111,11 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
+			name:    "unknown key is rejected rather than silently ignored",
+			envFile: "BILI_DATADIR=oops\n",
+			wantErr: "BILI_DATADIR",
+		},
+		{
 			name:    "malformed simplify",
 			envFile: "ASR_SIMPLIFY=yep\n",
 			wantErr: "ASR_SIMPLIFY",

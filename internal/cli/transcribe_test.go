@@ -337,6 +337,50 @@ func TestTranscribeMarksFailedLeavesNoAudio(t *testing.T) {
 	}
 }
 
+// TestTranscribeAbortsWhenTheEngineFails pins that a model which cannot be
+// loaded stops the whole leg instead of being re-reported per video: with two
+// no-subtitle videos, only the first may pay for an audio download, both rows
+// keep their state, and the command fails.
+func TestTranscribeAbortsWhenTheEngineFails(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BILI_DATA_DIR", dir)
+	seedVideoRow(t, dir, store.Video{Bvid: "BV1first", Cid: 1, Author: "某UP", Title: "一", State: store.StateNoSubtitle})
+	seedVideoRow(t, dir, store.Video{Bvid: "BV1second", Cid: 2, Author: "某UP", Title: "二", State: store.StateNoSubtitle})
+
+	overrideAudioPipeline(t, newAudioServer(t).URL)
+	backend := &fakeASR{err: fmt.Errorf("%w: 加载模型 smal 失败", asr.ErrWorkerEngine)}
+	overrideASRBackend(t, backend, nil)
+
+	out, err := executeOut(t, "transcribe")
+	if err == nil {
+		t.Fatalf("transcribe with a dead engine: err = nil, want a whole-leg error\n%s", out)
+	}
+	if !errors.Is(err, asr.ErrWorkerEngine) {
+		t.Fatalf("err = %v, want it to wrap asr.ErrWorkerEngine", err)
+	}
+	if got := backend.paths(); len(got) != 1 {
+		t.Fatalf("backend Transcribe calls = %d, want 1 (the rest must not download audio)", len(got))
+	}
+	if !strings.Contains(out, "ASR 引擎不可用") {
+		t.Errorf("output = %q, want the engine hint", out)
+	}
+
+	st, err := store.Open(filepath.Join(dir, "bili_sub.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	videos, err := st.ListVideos("")
+	if err != nil {
+		t.Fatalf("list videos: %v", err)
+	}
+	for _, v := range videos {
+		if v.State != store.StateNoSubtitle {
+			t.Errorf("video %s state = %q, want no_subtitle left untouched", v.Bvid, v.State)
+		}
+	}
+}
+
 // TestDownloadTranscribeAlsoTranscribes pins the flag wiring: `download
 // --transcribe` runs the ASR leg even when there is nothing to download, which
 // is exactly the no-subtitle case the flag exists for.

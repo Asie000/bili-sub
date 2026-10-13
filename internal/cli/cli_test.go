@@ -982,6 +982,56 @@ func TestDownloadStopsWhenSessionExpired(t *testing.T) {
 	}
 }
 
+// TestDownloadAbortsOnUnmatchedLang pins that a --lang which matches none of the
+// available tracks is an argument problem, not a per-video failure: the row must
+// stay downloadable instead of becoming failed, and the run must stop rather
+// than re-download every video only to fail the same way.
+func TestDownloadAbortsOnUnmatchedLang(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/x/player/v2":
+			fmt.Fprintf(w, `{"code":0,"message":"0","data":{"subtitle":{"subtitles":[{"lan":"zh-CN","subtitle_url":"http://%s/sub.json"}]}}}`, r.Host)
+		case "/sub.json":
+			_, _ = io.WriteString(w, `{"body":[{"from":0,"to":1,"content":"你好"}]}`)
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	overrideEnumerator(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav")
+	overrideDownloader(t, srv.URL+"/x/player/v2")
+
+	rt := newTestRuntime(t)
+	defer rt.close()
+	st, err := rt.store()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if _, err := st.UpsertVideo(&store.Video{Bvid: "BV1aaaa1111a", Cid: 1, Title: "源一", State: store.StateDownloadable, SourceKey: "111"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var out strings.Builder
+	stats, err := rt.download(context.Background(), &out, "ja", []string{"srt"}, false, defaultASRLang, "", "111", nil)
+	if !errors.Is(err, pipeline.ErrNoTrackForLang) {
+		t.Fatalf("err = %v, want pipeline.ErrNoTrackForLang", err)
+	}
+	if stats.Failed != 0 {
+		t.Fatalf("stats = %+v, want failed=0", stats)
+	}
+	if !strings.Contains(out.String(), "没有匹配") {
+		t.Errorf("output = %q, want the language hint", out.String())
+	}
+	rows, err := st.ListVideosFiltered("", "111")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].State != store.StateDownloadable {
+		t.Fatalf("rows = %+v, want the row left downloadable", rows)
+	}
+}
+
 // TestProbeSeasonKeysRowsByTheCollection pins the trap this feature exists to
 // close: a 合集 URL starts with space.bilibili.com/<mid>/, so before this the
 // probe silently returned the UP主's entire backlog instead of the collection

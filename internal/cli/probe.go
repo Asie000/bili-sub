@@ -224,12 +224,12 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 	tick := newProgressEmitter(stats.Total, onProgress)
 
 	prober := newProber(client, st, en)
-	// runCtx is cancelled when the first worker sees an expired session, so the
-	// other in-flight requests stop instead of each burning a request and marking
-	// its own row failed.
+	// runCtx is cancelled when the first worker sees a whole-leg failure (an
+	// expired session), so the other in-flight requests stop instead of each
+	// burning a request and marking its own row failed.
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	abort := newLegAbort(cancel)
+	abort := newLegAbort(cancel, sessionExpired)
 	outcomes := pipeline.Run(runCtx, videos, r.cfg.Concurrency, func(ctx context.Context, v store.Video) (probeOutcome, error) {
 		if _, skip := completed[v.ID]; skip {
 			tick(int(atomic.AddInt64(&doneCount, 1)))

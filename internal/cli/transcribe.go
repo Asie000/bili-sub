@@ -195,6 +195,15 @@ func (r *runtime) transcribe(ctx context.Context, out io.Writer, lang, model, so
 					err, len(videos)-i-1)
 				return stats, err
 			}
+			// An engine failure (a model that cannot be loaded, the worker process
+			// dying) would repeat identically for every remaining video -- and each
+			// one only pays for that failure after downloading its full audio. Stop
+			// the leg instead (spec §八).
+			if errors.Is(err, asr.ErrWorkerEngine) {
+				fmt.Fprintf(out, "ASR 引擎不可用，已停止转写（%v）；剩余 %d 个视频保持原状态。\n",
+					err, len(videos)-i-1)
+				return stats, err
+			}
 			// A cancelled run is not a per-video failure: the in-flight video
 			// returns context.Canceled, and counting it would report a failure that
 			// never happened (downloadSubtitles and probe guard the same way).

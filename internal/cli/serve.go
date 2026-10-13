@@ -29,6 +29,17 @@ const serveShutdownTimeout = 5 * time.Second
 // so one stalled connection cannot hold a handler slot forever.
 const serveReadHeaderTimeout = 10 * time.Second
 
+// serveReadTimeout caps reading a whole request. Every request body is a small
+// JSON object, so a slow or stalled reader is not a legitimate client here.
+const serveReadTimeout = 30 * time.Second
+
+// serveIdleTimeout, with ReadHeaderTimeout, is what actually bounds a stalled
+// connection: WriteTimeout is deliberately left unset because /api/events
+// streams for the whole life of a page and probe/download/export only write their
+// response after minutes of work, so any global write deadline would cut off the
+// operations this tool exists for.
+const serveIdleTimeout = 120 * time.Second
+
 // qrLoginTimeout bounds the background QR poll: a code that is scanned starts
 // the login within seconds and one that is not expires on its own, so this is
 // only a backstop that keeps a wedged poll from leaking its goroutine.
@@ -87,6 +98,8 @@ func (r *runtime) serve(ctx context.Context, out io.Writer, addr string) error {
 		Addr:              addr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: serveReadHeaderTimeout,
+		ReadTimeout:       serveReadTimeout,
+		IdleTimeout:       serveIdleTimeout,
 	}
 	// ListenAndServe blocks, so the shutdown path below needs the error value
 	// in hand before it can pick it up.

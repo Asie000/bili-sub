@@ -18,24 +18,27 @@ func sessionExpired(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.SessionExpired()
 }
 
-// legAbort lets the first worker that sees an expired session cancel the rest of
-// a run and remember the error for the caller. Workers run concurrently, so the
-// once keeps the first hit authoritative and the cancel idempotent.
+// legAbort lets the first worker that sees a whole-leg failure cancel the rest
+// of a run and remember the error for the caller. fatal decides which errors are
+// whole-leg (an expired session, an unsupported language); workers run
+// concurrently, so the once keeps the first hit authoritative and the cancel
+// idempotent.
 type legAbort struct {
 	once   sync.Once
 	err    error
 	cancel context.CancelFunc
+	fatal  func(error) bool
 }
 
-func newLegAbort(cancel context.CancelFunc) *legAbort {
-	return &legAbort{cancel: cancel}
+func newLegAbort(cancel context.CancelFunc, fatal func(error) bool) *legAbort {
+	return &legAbort{cancel: cancel, fatal: fatal}
 }
 
-// hit records err and aborts the run when err is an expired session. It reports
+// hit records err and aborts the run when err is a whole-leg failure. It reports
 // whether err was that fatal case, so the caller can skip the per-video failure
 // bookkeeping (SetState(failed)) for it.
 func (a *legAbort) hit(err error) bool {
-	if !sessionExpired(err) {
+	if err == nil || a.fatal == nil || !a.fatal(err) {
 		return false
 	}
 	a.once.Do(func() {
@@ -47,5 +50,5 @@ func (a *legAbort) hit(err error) bool {
 	return true
 }
 
-// aborted returns the session error that stopped the run, or nil.
+// aborted returns the error that stopped the run, or nil.
 func (a *legAbort) aborted() error { return a.err }

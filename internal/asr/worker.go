@@ -36,11 +36,20 @@ type transcribeRequest struct {
 }
 
 // transcribeResponse is one reply line. Error is non-empty when the script
-// could not transcribe the file.
+// could not transcribe the file. Kind is "engine" when the failure is about the
+// engine (a model that cannot be loaded, a missing dependency) rather than this
+// audio file; empty for a per-file failure.
 type transcribeResponse struct {
 	Segments []ir.Segment `json:"segments"`
 	Error    string       `json:"error"`
+	Kind     string       `json:"kind"`
 }
+
+// ErrWorkerEngine marks a failure that says nothing about the audio file being
+// transcribed: the model could not be loaded, or the worker process died. A
+// caller stops the whole run on it, because every remaining video would fail
+// identically -- but each of them only after its audio has been downloaded.
+var ErrWorkerEngine = errors.New("asr: 引擎不可用")
 
 // transcribe writes one request line and reads the matching response line. The
 // blocking read runs in a goroutine so a cancelled ctx returns promptly even
@@ -50,7 +59,7 @@ type transcribeResponse struct {
 func (wk *worker) transcribe(ctx context.Context, audioPath string, opts Options) ([]ir.Segment, error) {
 	req := transcribeRequest{Audio: audioPath, Lang: opts.Language, Model: opts.Model}
 	if err := wk.enc.Encode(req); err != nil {
-		return nil, fmt.Errorf("asr: 写入转写请求失败: %w", err)
+		return nil, fmt.Errorf("%w: 写入转写请求失败: %v", ErrWorkerEngine, err)
 	}
 
 	type result struct {
@@ -61,10 +70,16 @@ func (wk *worker) transcribe(ctx context.Context, audioPath string, opts Options
 	go func() {
 		var resp transcribeResponse
 		if err := wk.dec.Decode(&resp); err != nil {
-			ch <- result{err: fmt.Errorf("asr: 读取转写响应失败: %w", err)}
+			// A broken pipe means the worker process is gone; that is an engine
+			// failure, not one video's fault.
+			ch <- result{err: fmt.Errorf("%w: 读取转写响应失败: %v", ErrWorkerEngine, err)}
 			return
 		}
 		if resp.Error != "" {
+			if resp.Kind == "engine" {
+				ch <- result{err: fmt.Errorf("%w: %s", ErrWorkerEngine, resp.Error)}
+				return
+			}
 			ch <- result{err: errors.New("asr: " + resp.Error)}
 			return
 		}

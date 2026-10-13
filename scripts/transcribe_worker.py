@@ -146,34 +146,57 @@ def transcribe_segments(model, audio, lang):
     ]
 
 
+class EngineError(RuntimeError):
+    """The engine could not do its job -- a model that cannot be loaded -- as
+    opposed to an audio file it could not decode. Go stops the whole run on it
+    instead of downloading every remaining video's audio only to fail the same
+    way."""
+
+
+def _build(name, device):
+    """Load a model, tagging a load failure as an engine problem."""
+    try:
+        return load_model(name, device)
+    except ImportError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any load failure is engine-class
+        raise EngineError("%s: %s" % (type(exc).__name__, exc)) from exc
+
+
 def transcribe_with_fallback(name, audio, lang):
     """Load (or reuse) the model and transcribe one file, retrying once on the
     CPU when the GPU attempt fails.
 
-    Both the load and the inference sit inside the try because a missing CUDA
-    runtime surfaces at either point depending on the ctranslate2 build: some
-    raise from WhisperModel(...) itself, others only from the first decode. And
-    because load_model remembers the device it settled on, that retry happens at
-    most once per process rather than once per request.
-
-    The retry is deliberately limited to a GPU that has never worked: once CUDA
-    has produced a result, a later failure is about that file (a truncated or
-    undecodable download), and switching the rest of the batch to cpu/int8 for
-    it would cost ~20x while failing the same way.
+    A load failure and the first decode both sit behind the CUDA->CPU retry
+    because a missing CUDA runtime surfaces at either point depending on the
+    ctranslate2 build. Once CUDA has produced a result, a later failure is about
+    that file, and switching the rest of the batch to cpu/int8 for it would cost
+    ~20x while failing the same way -- so the retry is limited to a GPU that has
+    never worked. A load failure that survives the retry is an EngineError: Go
+    stops the run rather than paying for one audio download per remaining video.
     """
     global _cuda_proven
     device = _device or "cuda"
     try:
-        out = transcribe_segments(load_model(name, device), audio, lang)
+        model = _build(name, device)
+    except EngineError as exc:
+        if device != "cuda" or _cuda_proven:
+            raise
+        print("[worker] CUDA 不可用（%s），改用 CPU int8 重试" % exc, file=sys.stderr)
+        model = _build(name, "cpu")
+        return transcribe_segments(model, audio, lang)
+
+    try:
+        out = transcribe_segments(model, audio, lang)
     except ImportError:
-        # A missing faster-whisper is not a CUDA problem; the caller reports it.
         raise
-    except Exception as exc:  # noqa: BLE001 - any CUDA problem means "try the CPU"
+    except Exception as exc:
         if device != "cuda" or _cuda_proven:
             raise
         print("[worker] CUDA 不可用（%s: %s），改用 CPU int8 重试"
               % (type(exc).__name__, exc), file=sys.stderr)
-        return transcribe_segments(load_model(name, "cpu"), audio, lang)
+        model = _build(name, "cpu")
+        return transcribe_segments(model, audio, lang)
     if device == "cuda":
         _cuda_proven = True
     return out
@@ -207,7 +230,11 @@ def main():
             respond({
                 "error": "faster-whisper 未安装：请在 Python 3.9-3.12 环境运行 "
                          "`pip install faster-whisper`（%s）" % exc,
+                "kind": "engine",
             })
+        except EngineError as exc:
+            # About the engine, not the file: Go stops the run on this.
+            respond({"error": str(exc), "kind": "engine"})
         except Exception as exc:  # noqa: BLE001 - a bad request must not kill the loop
             respond({"error": "%s: %s" % (type(exc).__name__, exc)})
 

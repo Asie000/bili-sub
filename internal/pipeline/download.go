@@ -23,6 +23,12 @@ import (
 // transcriptEngine names the subtitle source for rows in the transcripts table.
 const transcriptEngine = "bilibili"
 
+// ErrNoTrackForLang reports that the video has subtitles but none in the
+// requested language family. It is a whole-run argument problem (a typo such as
+// --lang ja, or a script mismatch), not a failure of this video, so the caller
+// must not mark the row failed or re-download it on the next run.
+var ErrNoTrackForLang = errors.New("pipeline: 没有匹配指定语言的字幕轨")
+
 // subtitleHTTPTimeout bounds the subtitle-body fetch. The subtitle host is a CDN
 // and the payload is small, so this is deliberately shorter than a video fetch.
 const subtitleHTTPTimeout = 30 * time.Second
@@ -83,6 +89,9 @@ func (d *Downloader) FetchSubtitle(ctx context.Context, v store.Video, lang stri
 		return nil, err
 	}
 	if !ok {
+		if lang != "" {
+			return nil, fmt.Errorf("%w：%s 没有 lang=%q 的字幕轨", ErrNoTrackForLang, v.Bvid, lang)
+		}
 		return nil, fmt.Errorf("pipeline: no subtitle track for %s with lang=%q", v.Bvid, lang)
 	}
 

@@ -145,6 +145,13 @@ func (r *runtime) download(ctx context.Context, out io.Writer, lang string, form
 	return stats, nil
 }
 
+// downloadFatal reports the failures that would repeat for every remaining
+// video -- an expired session, or a --lang that matches none of the tracks -- so
+// download stops the leg instead of re-downloading each one first.
+func downloadFatal(err error) bool {
+	return sessionExpired(err) || errors.Is(err, pipeline.ErrNoTrackForLang)
+}
+
 func (r *runtime) downloadSubtitles(ctx context.Context, out io.Writer, lang string, formats []string, source string, onProgress func(done, total int)) (downloadStats, error) {
 	var stats downloadStats
 	st, err := r.store()
@@ -180,11 +187,11 @@ func (r *runtime) downloadSubtitles(ctx context.Context, out io.Writer, lang str
 	dir := r.subtitleDir()
 	dl := newDownloader(client, st, en, dir)
 
-	// runCtx is cancelled when the first worker sees an expired session, so the
+	// runCtx is cancelled when the first worker sees a whole-leg failure, so the
 	// other in-flight requests stop instead of each burning a request.
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	abort := newLegAbort(cancel)
+	abort := newLegAbort(cancel, downloadFatal)
 
 	results := pipeline.Run(runCtx, videos, r.cfg.Concurrency, func(ctx context.Context, v store.Video) (*ir.Document, error) {
 		doc, err := dl.FetchSubtitle(ctx, v, lang)
@@ -213,7 +220,7 @@ func (r *runtime) downloadSubtitles(ctx context.Context, out io.Writer, lang str
 			// A cancelled run leaves every item it never reached with ctx.Err(),
 			// and the -101 that stopped the run is reported once below. Neither is
 			// a failure of this video.
-			if errors.Is(res.Err, context.Canceled) || sessionExpired(res.Err) {
+			if errors.Is(res.Err, context.Canceled) || downloadFatal(res.Err) {
 				continue
 			}
 			failCount++
@@ -234,7 +241,12 @@ func (r *runtime) downloadSubtitles(ctx context.Context, out io.Writer, lang str
 	stats.Fetched = okCount
 	stats.Failed = failCount
 	if aerr := abort.aborted(); aerr != nil {
-		msg := "登录态失效，已停止下载（" + aerr.Error() + "）。请先运行 `bili-sub login`；剩余视频保持原状态。"
+		var msg string
+		if errors.Is(aerr, pipeline.ErrNoTrackForLang) {
+			msg = "指定的字幕语言在这些视频里没有匹配的轨道，已停止下载（" + aerr.Error() + "）；剩余视频保持原状态。"
+		} else {
+			msg = "登录态失效，已停止下载（" + aerr.Error() + "）。请先运行 `bili-sub login`；剩余视频保持原状态。"
+		}
 		fmt.Fprintln(out, msg)
 		stats.FirstError = msg
 		return stats, aerr

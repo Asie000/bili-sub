@@ -82,6 +82,32 @@ func TestWorkerTranscribeErrorResponse(t *testing.T) {
 	}
 }
 
+// TestWorkerTranscribeEngineError pins the `kind:"engine"` branch: a failure the
+// script judged to be about the engine (a model that cannot be loaded) must be
+// recognisable with errors.Is, so the caller can stop the whole run instead of
+// re-downloading audio for every remaining video.
+func TestWorkerTranscribeEngineError(t *testing.T) {
+	clientReader, serverWriter := io.Pipe()
+	serverReader, clientWriter := io.Pipe()
+	wk := newWorker(clientReader, clientWriter)
+
+	go func() {
+		var req map[string]string
+		if err := json.NewDecoder(serverReader).Decode(&req); err != nil {
+			return
+		}
+		_, _ = io.WriteString(serverWriter, `{"segments":[],"error":"无法加载模型 smal","kind":"engine"}`+"\n")
+	}()
+
+	_, err := wk.transcribe(context.Background(), "a.wav", Options{Model: "smal"})
+	if !errors.Is(err, ErrWorkerEngine) {
+		t.Fatalf("error = %v, want it to wrap ErrWorkerEngine", err)
+	}
+	if !strings.Contains(err.Error(), "smal") {
+		t.Fatalf("error = %q, want the worker message", err)
+	}
+}
+
 // TestWorkerTranscribeContextCancel pins the blocking-read escape hatch: when
 // the peer never answers, a cancelled context must return promptly instead of
 // hanging on the read.

@@ -615,6 +615,12 @@ func TestPickLang(t *testing.T) {
 		{"pref en picks en-US", subs("zh-CN", "en-US"), "en", "en-US", true},
 		{"pref exact beats prefix", subs("en-GB", "en"), "en", "en", true},
 		{"pref is case-insensitive", subs("zh-CN"), "ZH-cn", "zh-CN", true},
+		{"pref zh-Hans finds zh-CN", subs("en-US", "zh-CN"), "zh-Hans", "zh-CN", true},
+		{"pref zh-Hans finds generic zh", subs("zh"), "zh-Hans", "zh", true},
+		{"pref zh-Hans refuses the opposite script", subs("zh-Hant"), "zh-Hans", "", false},
+		{"pref zh finds ai-zh", subs("ai-zh"), "zh", "ai-zh", true},
+		{"pref en-GB matches the en family", subs("en"), "en-GB", "en", true},
+		{"pref zh-TW finds zh-Hant", subs("zh-Hant"), "zh-TW", "zh-Hant", true},
 		{"no match", subs("zh-CN", "en-US"), "fr", "", false},
 		{"empty", nil, "", "", false},
 	}
