@@ -29,6 +29,11 @@ const transcribeWorkerScript = "scripts/transcribe_worker.py"
 // talk is the common case, so zh is the safer default than auto-detection.
 const defaultASRLang = "zh"
 
+// audioFileExt is the extension AudioFetcher writes its temporary dash audio
+// with. sweepStaleAudio keys off it so it never touches anything else that
+// happens to live in the scratch dir.
+const audioFileExt = ".m4s"
+
 // newAudioFetcher and newASRBackend are variables so tests can drive the ASR
 // leg against fake servers and a scripted backend; production always uses the
 // real constructors. This mirrors the newDownloader seam in download.go.
@@ -85,6 +90,28 @@ func (r *runtime) audioDir() string {
 	return filepath.Join(r.cfg.DataDir, "audio")
 }
 
+// sweepStaleAudio clears the temporary audio directory before a run starts.
+//
+// Deleting each file as soon as its transcript is stored covers every way a run
+// can end except the one the OS owns: a process that is killed outright
+// (SIGKILL, a closed terminal, a crash, a power cut) never reaches its defers.
+// What such a run leaves is several MB per video, under a name nobody would
+// connect back to a video. This directory is this process's own scratch space
+// and pipeline operations are serialized, so whatever is in it when a run
+// starts belongs to a run that is already over.
+func (r *runtime) sweepStaleAudio() {
+	entries, err := os.ReadDir(r.audioDir())
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != audioFileExt {
+			continue
+		}
+		_ = os.Remove(filepath.Join(r.audioDir(), e.Name()))
+	}
+}
+
 // transcribe runs the local ASR leg over every no_subtitle video (optionally
 // scoped to one source): download the dash audio, hand it to the backend, write
 // the .srt and the canonical IR, then drop the audio. One failed video does not
@@ -93,6 +120,10 @@ func (r *runtime) audioDir() string {
 // stops the run before it mutates any state (spec §八).
 func (r *runtime) transcribe(ctx context.Context, out io.Writer, lang, model, source string, onProgress func(done, total int)) (transcribeStats, error) {
 	var stats transcribeStats
+	// Anything already here is from a run that was killed before it could clean
+	// up: a run that ends normally leaves nothing behind, so this only ever
+	// removes garbage.
+	r.sweepStaleAudio()
 	st, err := r.store()
 	if err != nil {
 		return stats, err

@@ -513,6 +513,90 @@ func TestTranscribeDoesNotMarkFailedWhenCancelledMidVideo(t *testing.T) {
 	}
 }
 
+// TestCancelledTranscribeDeletesTheAudioItDownloaded pins the half of the
+// contract that the signal handler depends on: by the time a cancelled command
+// returns, the file it was working on is gone. main wires Ctrl+C to exactly
+// this context, so a regression here becomes a leak the user has to find and
+// clean up by hand.
+func TestCancelledTranscribeDeletesTheAudioItDownloaded(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BILI_DATA_DIR", dir)
+	seedVideoRow(t, dir, store.Video{
+		Bvid: "BV1nosubtitle", Cid: 88, Author: "某UP", Title: "无字幕视频",
+		State: store.StateNoSubtitle,
+	})
+
+	overrideAudioPipeline(t, newAudioServer(t).URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	overrideASRBackend(t, &fakeASR{err: errors.New("转写被取消"), cancel: cancel}, nil)
+
+	if _, err := executeContextOut(t, ctx, "transcribe"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+
+	assertNoAudioLeft(t, dir)
+}
+
+// TestTranscribeSweepsAudioLeftByAKilledRun covers what no amount of cleanup
+// code can: a run the OS kills outright (SIGKILL, a closed terminal, a crash,
+// a power cut) never reaches its defers. What a killed run leaves behind is
+// several MB per video under a name nobody would connect back to a video, so
+// the next run clears its own scratch dir first rather than growing forever.
+// `download --transcribe` reaches this through the same runtime.transcribe.
+func TestTranscribeSweepsAudioLeftByAKilledRun(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BILI_DATA_DIR", dir)
+	seedVideoRow(t, dir, store.Video{
+		Bvid: "BV1nosubtitle", Cid: 88, Author: "某UP", Title: "无字幕视频",
+		State: store.StateNoSubtitle,
+	})
+
+	audioDir := filepath.Join(dir, "audio")
+	if err := os.MkdirAll(audioDir, 0o755); err != nil {
+		t.Fatalf("mkdir audio: %v", err)
+	}
+	// A different bvid on purpose: only the sweep can remove this one, because
+	// the run deletes its own file under a name of its own.
+	stale := filepath.Join(audioDir, "BV1killedrun-4242.m4s")
+	if err := os.WriteFile(stale, []byte("half-written audio from a killed run"), 0o644); err != nil {
+		t.Fatalf("write stale audio: %v", err)
+	}
+
+	overrideAudioPipeline(t, newAudioServer(t).URL)
+	overrideASRBackend(t, &fakeASR{segments: []ir.Segment{{StartMs: 0, EndMs: 900, Text: "转写内容"}}}, nil)
+
+	out, err := executeOut(t, "transcribe")
+	if err != nil {
+		t.Fatalf("transcribe: %v\n%s", err, out)
+	}
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("audio from a killed run survived the next run: %s", stale)
+	}
+	assertNoAudioLeft(t, dir)
+}
+
+// assertNoAudioLeft fails when anything is still in the temporary audio dir.
+func assertNoAudioLeft(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(dir, "audio"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		t.Fatalf("read audio dir: %v", err)
+	}
+	if len(entries) == 0 {
+		return
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	t.Errorf("temporary audio left on disk: %v", names)
+}
+
 // TestTranscribeEmptyTranscriptIsAFailure pins the silent-video branch: a model
 // that recognises nothing must not be recorded as a successful transcription
 // with an empty subtitle.

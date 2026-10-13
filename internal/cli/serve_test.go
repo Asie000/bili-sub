@@ -250,3 +250,32 @@ func TestQRLoginCancelsThePollWhenTheRequestGoesAway(t *testing.T) {
 		t.Fatal("the in-flight poll was not cancelled together with the request")
 	}
 }
+
+// TestServeStopsWhenTheProcessIsAskedToStop pins the graceful shutdown. main
+// now turns Ctrl+C into a context cancellation rather than a kill, so a server
+// that only listens would become impossible to stop with the very key its own
+// startup message tells the user to press.
+func TestServeStopsWhenTheProcessIsAskedToStop(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BILI_DATA_DIR", dir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := executeContextOut(t, ctx, "serve", "--addr", "127.0.0.1:0")
+		done <- err
+	}()
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("serve returned %v after a stop request, want a clean shutdown", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve ignored the cancellation: Ctrl+C would appear to do nothing")
+	}
+}

@@ -21,6 +21,13 @@ import (
 // performs after saving the value.
 const loginCheckTimeout = 30 * time.Second
 
+// serveShutdownTimeout bounds the wait for in-flight requests after Ctrl+C.
+const serveShutdownTimeout = 5 * time.Second
+
+// serveReadHeaderTimeout caps how long a client may take to send its headers,
+// so one stalled connection cannot hold a handler slot forever.
+const serveReadHeaderTimeout = 10 * time.Second
+
 // qrLoginTimeout bounds the background QR poll: a code that is scanned starts
 // the login within seconds and one that is not expires on its own, so this is
 // only a backstop that keeps a wedged poll from leaking its goroutine.
@@ -46,15 +53,22 @@ func newServeCmd() *cobra.Command {
 				return err
 			}
 			defer rt.close()
-			return rt.serve(cmd.OutOrStdout(), addr)
+			return rt.serve(cmd.Context(), cmd.OutOrStdout(), addr)
 		},
 	}
 	cmd.Flags().String("addr", ":8080", "监听地址")
 	return cmd
 }
 
-// serve wires the store and the pipeline seams into the HTTP server.
-func (r *runtime) serve(out io.Writer, addr string) error {
+// serve wires the store and the pipeline seams into the HTTP server. It returns
+// when the listener fails or when the process is asked to stop (ctx, which
+// main cancels on Ctrl+C).
+//
+// Stopping on request is why this no longer calls http.ListenAndServe directly:
+// once Ctrl+C cancels a context instead of killing the process, a bare
+// ListenAndServe would leave a server that ignores the very key its own startup
+// message tells the user to press.
+func (r *runtime) serve(ctx context.Context, out io.Writer, addr string) error {
 	st, err := r.store()
 	if err != nil {
 		return err
@@ -66,7 +80,37 @@ func (r *runtime) serve(out io.Writer, addr string) error {
 		display = "localhost" + display
 	}
 	fmt.Fprintf(out, "Web 界面已启动：http://%s（Ctrl+C 退出）\n", display)
-	return http.ListenAndServe(addr, srv.Handler())
+
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: serveReadHeaderTimeout,
+	}
+	// ListenAndServe blocks, so the shutdown path below needs the error value
+	// in hand before it can pick it up.
+	errCh := make(chan error, 1)
+	go func() { errCh <- httpSrv.ListenAndServe() }()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		// Let the request in flight finish, then stop. The wait is short
+		// because a download leg can take minutes and a second Ctrl+C (main
+		// restores the default handler on the first one) still exits
+		// immediately.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), serveShutdownTimeout)
+		defer cancel()
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			_ = httpSrv.Close()
+			return err
+		}
+		// Unlike probe/download/transcribe, where a cancellation must not look
+		// like a clean run, stopping this server is the documented, normal way
+		// out, so it is not reported as an error.
+		fmt.Fprintln(out, "Web 界面已停止。")
+		return nil
+	}
 }
 
 // serveOptions builds the server's seams. They reuse the CLI helpers, so the
