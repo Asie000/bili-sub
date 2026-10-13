@@ -85,6 +85,10 @@ type probeStats struct {
 	ChargingLocked int
 	Failed         int
 	Skipped        int
+	// Hint is a sentence for the user that is not a count, currently the 合集 the
+	// probed video turned out to belong to. It is a value rather than a direct
+	// print so the CLI and the web summary show the same thing.
+	Hint string
 }
 
 // probeOutcome is what one worker learned about one video. err is carried in
@@ -126,7 +130,12 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 		return stats, err
 	}
 	if kind == pipeline.KindSingle {
-		printSeasonHint(out, infos)
+		// One video can be one episode of a 合集. Rather than quietly turning a
+		// 1-video request into 31 videos and 30x the requests, say so and hand over
+		// the link that would collect the rest.
+		if stats.Hint = seasonHint(infos); stats.Hint != "" {
+			fmt.Fprintln(out, stats.Hint)
+		}
 	}
 	st, err := r.store()
 	if err != nil {
@@ -274,20 +283,20 @@ func collectVideos(ctx context.Context, en *pipeline.Enumerator, kind pipeline.S
 	}
 }
 
-// printSeasonHint answers the question a single-video link raises without acting
-// on it: this video is one episode of a 合集, and the whole collection is one
-// paste away. Expanding it automatically would turn a one-video request into
-// thirty videos and thirty times the requests, so the link is offered instead.
-func printSeasonHint(out io.Writer, infos []*bili.VideoInfo) {
+// seasonHint answers the question a single-video link raises without acting on
+// it: this video is one episode of a 合集, and the whole collection is one paste
+// away. It returns "" for a video in no 合集, which is the common case.
+func seasonHint(infos []*bili.VideoInfo) string {
 	for _, vi := range infos {
 		season := vi.UgcSeason
 		if season == nil || season.ID == 0 || season.Mid == 0 {
 			continue
 		}
-		fmt.Fprintf(out, "提示：这条视频属于合集《%s》，共 %d 条。要抓整个合集，用这个链接：\n  %s\n",
+		return fmt.Sprintf("提示：这条视频属于合集《%s》，共 %d 条。要抓整个合集，用这个链接：\n  %s",
 			season.Title, season.VideoCount(),
 			pipeline.SeasonURL(strconv.FormatInt(season.Mid, 10), strconv.FormatInt(season.ID, 10)))
 	}
+	return ""
 }
 
 // expandPages writes one store.Video per page (Ruling F): a multi-P video is

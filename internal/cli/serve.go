@@ -143,6 +143,7 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 				ChargingLocked: stats.ChargingLocked,
 				Failed:         stats.Failed,
 				Skipped:        stats.Skipped,
+				Hint:           stats.Hint,
 			}, nil
 		},
 		Download: func(ctx context.Context, lang string, transcribe bool, asrLang, model, source string, onProgress func(server.Progress)) (server.DownloadSummary, error) {

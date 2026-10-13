@@ -25,6 +25,11 @@ type ProbeSummary struct {
 	ChargingLocked int `json:"charging_locked"`
 	Failed         int `json:"failed"`
 	Skipped        int `json:"skipped"`
+	// Hint carries a sentence for the user that is not a count -- currently that
+	// the probed single video belongs to a 合集, with the link to paste. The
+	// browser has no terminal to read, so the CLI's hint has to travel with the
+	// summary or the page simply cannot mention it.
+	Hint string `json:"hint,omitempty"`
 }
 
 // VideoPage is one page of GET /api/videos. Items is always a non-nil slice so

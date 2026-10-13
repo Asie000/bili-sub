@@ -228,6 +228,12 @@ async function probe() {
     } else {
       log(`探测完成：共 ${summary.probed}，可下载 ${summary.downloadable}，无字幕 ${summary.no_subtitle}，充电锁定 ${summary.charging_locked}，失败 ${summary.failed}`);
     }
+    // One video can be one episode of a 合集. The server decides that and sends
+    // the sentence (with the link to paste) rather than expanding it here: a
+    // 1-video request must not quietly turn into 31.
+    if (summary.hint) {
+      log(summary.hint);
+    }
     await loadVideos();
   } catch (err) {
     showFailure();

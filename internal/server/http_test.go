@@ -200,6 +200,30 @@ func TestProbeEndpointPassesForceToSeam(t *testing.T) {
 	}
 }
 
+// TestProbeEndpointReturnsTheHint pins that the 合集 hint survives the API layer:
+// the browser has no terminal to read, so a summary that dropped the field would
+// leave the page silently unable to tell the user which link to paste next.
+func TestProbeEndpointReturnsTheHint(t *testing.T) {
+	const hint = "提示：这条视频属于合集《100个办公神技》，共 31 条。"
+	s := newTestServer(t, Options{
+		Probe: func(_ context.Context, _, _ string, _ bool, _ func(Progress)) (ProbeSummary, error) {
+			return ProbeSummary{Probed: 1, Downloadable: 1, Hint: hint}, nil
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/probe", `{"url":"BV1u84y1i7u6"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var got ProbeSummary
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if got.Hint != hint {
+		t.Errorf("hint = %q, want %q", got.Hint, hint)
+	}
+}
+
 func TestProbeEndpointRejectsEmptyURL(t *testing.T) {
 	s := newTestServer(t, Options{
 		Probe: func(_ context.Context, _, _ string, _ bool, _ func(Progress)) (ProbeSummary, error) {

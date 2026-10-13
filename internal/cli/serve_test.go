@@ -279,3 +279,42 @@ func TestServeStopsWhenTheProcessIsAskedToStop(t *testing.T) {
 		t.Fatal("serve ignored the cancellation: Ctrl+C would appear to do nothing")
 	}
 }
+
+// TestServeProbeSeamCarriesTheSeasonHint pins the mapping across the seam: the
+// CLI-side probe computes the 合集 hint, and the browser only ever sees what the
+// seam puts into the summary. Dropping it here is invisible from either end.
+func TestServeProbeSeamCarriesTheSeasonHint(t *testing.T) {
+	const bvid = "BV1u84y1i7u6"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/x/web-interface/view":
+			fmt.Fprintf(w, `{"code":0,"message":"0","data":{"bvid":%q,"cid":1001,"title":"视频","pubdate":1,"duration":10,"owner":{"mid":406571547,"name":"up"},"pages":[{"cid":1001,"page":1,"part":"P1"}],"ugc_season":{"id":814546,"mid":406571547,"title":"100个办公神技","ep_count":31,"sections":[{"episodes":[{"bvid":%q}]}]}}}`, bvid, bvid)
+		case "/x/player/v2":
+			_, _ = w.Write([]byte(`{"code":0,"message":"0","data":{"subtitle":{"subtitles":[]}}}`))
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	overrideEnumerator(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav")
+	overrideProber(t, srv.URL+"/x/player/v2")
+
+	rt := newTestRuntime(t)
+	defer rt.close()
+	st, err := rt.store()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	opts := rt.serveOptions(st, server.NewHub())
+
+	summary, err := opts.Probe(context.Background(), bvid, "", false, nil)
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	for _, want := range []string{"100个办公神技", "sid=814546"} {
+		if !strings.Contains(summary.Hint, want) {
+			t.Errorf("summary.Hint = %q, want it to contain %q", summary.Hint, want)
+		}
+	}
+}

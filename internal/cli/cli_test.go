@@ -917,6 +917,14 @@ func TestProbeSingleVideoPointsAtItsSeason(t *testing.T) {
 			t.Errorf("output = %q, want it to contain %q", got, want)
 		}
 	}
+	// The same sentence has to reach the browser, which has no terminal to read.
+	// Comparing against the printed bytes pins that the two cannot drift apart.
+	if !strings.Contains(stats.Hint, "sid=814546") {
+		t.Errorf("stats.Hint = %q, want the 合集 link so the page can offer it", stats.Hint)
+	}
+	if !strings.Contains(got, stats.Hint+"\n") {
+		t.Errorf("printed output %q does not contain stats.Hint %q verbatim", got, stats.Hint)
+	}
 }
 
 // TestProbeSingleVideoWithoutASeasonStaysQuiet: most videos belong to no 合集, so
@@ -943,10 +951,14 @@ func TestProbeSingleVideoWithoutASeasonStaysQuiet(t *testing.T) {
 	defer rt.close()
 
 	var out strings.Builder
-	if _, err := rt.probe(context.Background(), &out, bvid, "", false, nil); err != nil {
+	stats, err := rt.probe(context.Background(), &out, bvid, "", false, nil)
+	if err != nil {
 		t.Fatalf("probe: %v\n%s", err, out.String())
 	}
 	if strings.Contains(out.String(), "合集") {
 		t.Errorf("output = %q, want no 合集 hint for a video in no 合集", out.String())
+	}
+	if stats.Hint != "" {
+		t.Errorf("stats.Hint = %q, want empty when the video belongs to no 合集", stats.Hint)
 	}
 }
