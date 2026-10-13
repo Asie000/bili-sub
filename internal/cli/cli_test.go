@@ -507,32 +507,37 @@ func TestProgressEmitterNilEmitIsNoop(t *testing.T) {
 
 // --- Task 23: scaling (paged list, source scoping, skip completed) ---
 
-// overrideEnumerator points the probe/download enumerator at a fake view server
-// for the duration of one test.
-func overrideEnumerator(t *testing.T, viewURL, navURL string) {
+// overrideEnumeratorWith points the probe/download enumerator at a fake view and
+// nav server, then lets the caller redirect whichever listing endpoints its test
+// needs -- one helper instead of one per source kind.
+func overrideEnumeratorWith(t *testing.T, viewURL, navURL string, configure func(*pipeline.Enumerator)) {
 	t.Helper()
 	prev := newEnumerator
 	newEnumerator = func(c *bili.Client) *pipeline.Enumerator {
 		en := pipeline.NewEnumerator(c)
 		en.ViewBaseURL = viewURL
 		en.NavURL = navURL
+		if configure != nil {
+			configure(en)
+		}
 		return en
 	}
 	t.Cleanup(func() { newEnumerator = prev })
 }
 
+// overrideEnumerator points the probe/download enumerator at a fake view server
+// for the duration of one test.
+func overrideEnumerator(t *testing.T, viewURL, navURL string) {
+	t.Helper()
+	overrideEnumeratorWith(t, viewURL, navURL, nil)
+}
+
 // overrideSeasonEnumerator is overrideEnumerator plus the 合集 listing endpoint.
 func overrideSeasonEnumerator(t *testing.T, viewURL, navURL, seasonURL string) {
 	t.Helper()
-	prev := newEnumerator
-	newEnumerator = func(c *bili.Client) *pipeline.Enumerator {
-		en := pipeline.NewEnumerator(c)
-		en.ViewBaseURL = viewURL
-		en.NavURL = navURL
+	overrideEnumeratorWith(t, viewURL, navURL, func(en *pipeline.Enumerator) {
 		en.SeasonBaseURL = seasonURL
-		return en
-	}
-	t.Cleanup(func() { newEnumerator = prev })
+	})
 }
 
 // overrideProber points the prober's unsigned player endpoint at a fake server.
@@ -596,7 +601,7 @@ func TestProbeSkipsCompletedVideos(t *testing.T) {
 	}
 
 	var out strings.Builder
-	stats, err := rt.probe(context.Background(), &out, bvid, "single", false, nil)
+	stats, err := rt.probe(context.Background(), &out, bvid, "single", false, pipeline.DefaultSearchLimit, nil)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
@@ -618,7 +623,7 @@ func TestProbeSkipsCompletedVideos(t *testing.T) {
 	}
 
 	// --force re-probes the same video and advances its state.
-	stats, err = rt.probe(context.Background(), io.Discard, bvid, "single", true, nil)
+	stats, err = rt.probe(context.Background(), io.Discard, bvid, "single", true, pipeline.DefaultSearchLimit, nil)
 	if err != nil {
 		t.Fatalf("probe --force: %v", err)
 	}
@@ -851,7 +856,7 @@ func TestProbeSeasonKeysRowsByTheCollection(t *testing.T) {
 
 	const link = "https://space.bilibili.com/453013730/channel/collectiondetail?sid=9241496"
 	var out strings.Builder
-	stats, err := rt.probe(context.Background(), &out, link, "", false, nil)
+	stats, err := rt.probe(context.Background(), &out, link, "", false, pipeline.DefaultSearchLimit, nil)
 	if err != nil {
 		t.Fatalf("probe: %v\n%s", err, out.String())
 	}
@@ -904,7 +909,7 @@ func TestProbeSingleVideoPointsAtItsSeason(t *testing.T) {
 	defer rt.close()
 
 	var out strings.Builder
-	stats, err := rt.probe(context.Background(), &out, bvid, "", false, nil)
+	stats, err := rt.probe(context.Background(), &out, bvid, "", false, pipeline.DefaultSearchLimit, nil)
 	if err != nil {
 		t.Fatalf("probe: %v\n%s", err, out.String())
 	}
@@ -924,6 +929,89 @@ func TestProbeSingleVideoPointsAtItsSeason(t *testing.T) {
 	}
 	if !strings.Contains(got, stats.Hint+"\n") {
 		t.Errorf("printed output %q does not contain stats.Hint %q verbatim", got, stats.Hint)
+	}
+}
+
+// TestProbeSearchKeysRowsByKeywordAndStopsAtTheLimit pins both halves of a
+// keyword probe: the rows are grouped under search:<keyword>, which is what
+// --source filters on, and the run creates at most --limit of them. One keyword
+// can match a thousand videos and every hit costs a view call, so a run with no
+// cap would be eight minutes long.
+func TestProbeSearchKeysRowsByKeywordAndStopsAtTheLimit(t *testing.T) {
+	navBody := fmt.Sprintf(`{"code":0,"message":"0","data":{"wbi_img":{"img_url":%q,"sub_url":%q}}}`,
+		"https://i0.hdslb.com/bfs/wbi/"+strings.Repeat("a", 32)+".png",
+		"https://i0.hdslb.com/bfs/wbi/"+strings.Repeat("b", 32)+".png")
+
+	var mu sync.Mutex
+	var searchPages []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/x/web-interface/nav":
+			_, _ = io.WriteString(w, navBody)
+		case "/x/web-interface/wbi/search/type":
+			q := r.URL.Query()
+			if q.Get("keyword") != "劳动法" {
+				t.Errorf("keyword=%q, want the normalized keyword", q.Get("keyword"))
+			}
+			page := q.Get("page")
+			mu.Lock()
+			searchPages = append(searchPages, page)
+			mu.Unlock()
+			// Two fresh hits per page, so only the limit can stop this run: a
+			// listing that ran out would end it for the wrong reason.
+			switch page {
+			case "1":
+				_, _ = io.WriteString(w, `{"code":0,"message":"0","data":{"numPages":50,"result":[{"bvid":"BV1uv411q7Mv"},{"bvid":"BV1uv411q7Mx"}]}}`)
+			case "2":
+				_, _ = io.WriteString(w, `{"code":0,"message":"0","data":{"numPages":50,"result":[{"bvid":"BV1uv411q7My"},{"bvid":"BV1uv411q7Mz"}]}}`)
+			default:
+				t.Errorf("unexpected search page %q: the limit should have stopped the run", page)
+				_, _ = io.WriteString(w, `{"code":0,"message":"0","data":{"numPages":50,"result":[]}}`)
+			}
+		case "/x/web-interface/view":
+			bvid := r.URL.Query().Get("bvid")
+			fmt.Fprintf(w, `{"code":0,"message":"0","data":{"bvid":%q,"cid":1001,"title":"视频","pubdate":1,"duration":10,"owner":{"mid":1,"name":"up"},"pages":[{"cid":1001,"page":1,"part":"P1"}]}}`, bvid)
+		case "/x/player/v2":
+			_, _ = io.WriteString(w, `{"code":0,"message":"0","data":{"subtitle":{"subtitles":[]}}}`)
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	overrideEnumeratorWith(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav",
+		func(en *pipeline.Enumerator) { en.SearchBaseURL = srv.URL + "/x/web-interface/wbi/search/type" })
+	overrideProber(t, srv.URL+"/x/player/v2")
+
+	rt := newTestRuntime(t)
+	defer rt.close()
+
+	// Whitespace around the keyword, because that is what a pasted keyword looks
+	// like and the source key has to normalize it away.
+	var out strings.Builder
+	stats, err := rt.probe(context.Background(), &out, " 劳动法 ", "search", false, 3, nil)
+	if err != nil {
+		t.Fatalf("probe: %v\n%s", err, out.String())
+	}
+	if stats.Total != 3 {
+		t.Fatalf("stats = %+v, want exactly 3 rows from a limit of 3", stats)
+	}
+
+	st, err := rt.store()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	rows, err := st.ListVideosFiltered("", "search:劳动法")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("rows keyed by search:劳动法 = %d, want 3", len(rows))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(searchPages) != 2 || searchPages[0] != "1" || searchPages[1] != "2" {
+		t.Fatalf("search pages = %v, want [1 2]", searchPages)
 	}
 }
 
@@ -951,7 +1039,7 @@ func TestProbeSingleVideoWithoutASeasonStaysQuiet(t *testing.T) {
 	defer rt.close()
 
 	var out strings.Builder
-	stats, err := rt.probe(context.Background(), &out, bvid, "", false, nil)
+	stats, err := rt.probe(context.Background(), &out, bvid, "", false, pipeline.DefaultSearchLimit, nil)
 	if err != nil {
 		t.Fatalf("probe: %v\n%s", err, out.String())
 	}

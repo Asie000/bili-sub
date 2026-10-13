@@ -25,8 +25,8 @@
 | 版本 | 输入来源 | 其他 |
 |---|---|---|
 | **第一版（本次实现）** | 单视频、个人主页(UID)、收藏夹(FID) | login / probe / download / export / status / serve；ASR 接口预留 |
-| 第二版 | 视频选集（series） | 合集(season) 已完成 |
-| 第三版 | 搜索页面 | WBI 分页 + 结果去重 |
+| 第二版 | 视频选集（series） | 合集(season)、搜索页 已完成 |
+| 第三版 | 播放列表（稍后再看等） | 暫无计划 |
 
 ---
 
@@ -295,7 +295,7 @@ IR 始终保留时间轴；**渲染 txt/json/md 时丢弃时间轴**，渲染 sr
 ## 十五、后续（非第一版）
 
 - ASR worker 的 Python 环境：见 §九 —— 原生 Windows Python 3.9–3.12（不走 WSL），venv 建在 `.asr-venv/`。**不要放 `data/` 下**：`reset --yes` 会整目录删除，连 Python 环境一起删。装依赖用 `pip install faster-whisper "av<19"`；模型首次运行自动下载到 HuggingFace 缓存。
-- 第二版：合集（已完成）；第三版：视频选集 + 搜索页。
+- 第二版：合集（已完成）、搜索页（已完成）；视频选集（series）仍未做，现在会明确报「暂不支持」。
 
 ### 合集（season）已实现（2026-10-13）
 
@@ -316,4 +316,15 @@ IR 始终保留时间轴；**渲染 txt/json/md 时丢弃时间轴**，渲染 sr
 > `source_key` 均为 `season:<mid>:<sid>`；series 链接报错。
 > 注意：同一批视频若曾以 space 来源抓过，重新按合集抓会**把 source_key 改写成合集键**，
 > 按旧键过滤就找不到了。
+
+### 搜索页已实现（2026-10-13）
+
+`bili-sub probe --kind search --limit 20 劳动法`（网页端来源类型选「搜索关键词」）。来源键 `search:<关键词>`（空白会归一化）。
+
+- **必须登录**：匿名的失败点在**取 WBI 密钥那一步**（`nav` 返 `-101`），不是搜索本身被拦。
+- **必须用 WBI 那个端点**：`x/web-interface/wbi/search/type`；非 WBI 的 `x/web-interface/search/type` 直接返 **HTML 403**。
+- **默认只取 50 条**（`pipeline.DefaultSearchLimit`），`--limit 0` = 不限。一个词最多出 **1000 条**（`numResults` 上限，`numPages` 50），而**每条都要再 `view` 一次拿 cid** → 不限的话就是 1000 请求 ≈ 8 分钟。
+- 搜索响应的 **`title` 不用**：它可能带 `<em class="keyword">` 高亮，而且反正每条都要 `view`（拿 cid / 整数时长 / 充电标记），`view` 的标题是干净的。搜索里的 `duration` 是 `"2:12"` 这种**字符串**，也能一并绕开。
+
+> 实测：`--kind search --limit 3 劳动法` → 3 条（新华社/中新视频/川观新闻）、12 秒、`source_key=search:劳动法`。
 - 视频列表「字段设置」：第一版固定展示序号/标题/作者/发布日期/字幕状态/字幕语言/是否充电，后续再加可配置。

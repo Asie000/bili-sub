@@ -59,7 +59,15 @@ func newProbeCmd() *cobra.Command {
 		Short: "枚举来源并探测字幕可用性（不下载）",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			kind, err := cmd.Flags().GetString("kind")
+			if err != nil {
+				return err
+			}
 			force, err := cmd.Flags().GetBool("force")
+			if err != nil {
+				return err
+			}
+			limit, err := cmd.Flags().GetInt("limit")
 			if err != nil {
 				return err
 			}
@@ -68,11 +76,13 @@ func newProbeCmd() *cobra.Command {
 				return err
 			}
 			defer rt.close()
-			_, err = rt.probe(cmd.Context(), cmd.OutOrStdout(), args[0], "", force, nil)
+			_, err = rt.probe(cmd.Context(), cmd.OutOrStdout(), args[0], kind, force, limit, nil)
 			return err
 		},
 	}
+	cmd.Flags().String("kind", "", "来源类型（single/space/fav/season/search），空则按 URL 自动识别")
 	cmd.Flags().Bool("force", false, "重新探测已完成的视频（fetched/transcribed/exported）")
+	cmd.Flags().Int("limit", pipeline.DefaultSearchLimit, "搜索来源最多取多少条（0 = 不限）；其他来源忽略此项")
 	return cmd
 }
 
@@ -101,7 +111,7 @@ type probeOutcome struct {
 	skipped bool
 }
 
-func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec string, force bool, onProgress func(done, total int)) (probeStats, error) {
+func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec string, force bool, limit int, onProgress func(done, total int)) (probeStats, error) {
 	var stats probeStats
 	var kind pipeline.SourceKind
 	var key string
@@ -125,7 +135,7 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 	}
 	en := newEnumerator(client)
 
-	infos, err := collectVideos(ctx, en, kind, key)
+	infos, err := collectVideos(ctx, en, kind, key, limit)
 	if err != nil {
 		return stats, err
 	}
@@ -260,7 +270,7 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 }
 
 // collectVideos turns a parsed source into full VideoInfo records.
-func collectVideos(ctx context.Context, en *pipeline.Enumerator, kind pipeline.SourceKind, key string) ([]*bili.VideoInfo, error) {
+func collectVideos(ctx context.Context, en *pipeline.Enumerator, kind pipeline.SourceKind, key string, limit int) ([]*bili.VideoInfo, error) {
 	switch kind {
 	case pipeline.KindSingle:
 		vi, err := en.ResolveVideo(ctx, key)
@@ -278,6 +288,12 @@ func collectVideos(ctx context.Context, en *pipeline.Enumerator, kind pipeline.S
 			return nil, fmt.Errorf("probe: 合集来源键格式不对：%q", key)
 		}
 		return en.EnumerateSeason(ctx, mid, seasonID)
+	case pipeline.KindSearch:
+		keyword, ok := pipeline.SplitSearchKey(key)
+		if !ok {
+			return nil, fmt.Errorf("probe: 搜索来源键格式不对：%q", key)
+		}
+		return en.EnumerateSearch(ctx, keyword, limit)
 	default:
 		return nil, fmt.Errorf("probe: 不支持的来源类型 %s", kind)
 	}

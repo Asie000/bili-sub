@@ -19,14 +19,24 @@ const (
 	defaultFavBaseURL    = "https://api.bilibili.com/x/v3/fav/resource/list"
 	defaultViewBaseURL   = "https://api.bilibili.com/x/web-interface/view"
 	defaultSeasonBaseURL = "https://api.bilibili.com/x/polymer/web-space/seasons_archives_list"
+	defaultSearchBaseURL = "https://api.bilibili.com/x/web-interface/wbi/search/type"
 
 	spacePageSize = 30
 	favPageSize   = 20
+	// searchPageSize is what the search endpoint hands back per page.
+	searchPageSize = 20
 	// seasonPageSize is what seasons_archives_list accepts. Asking for more than
 	// 30 answers with a null data payload instead of clamping, so this is a real
 	// limit and not a tuning knob.
 	seasonPageSize = 30
 )
+
+// DefaultSearchLimit is how many hits a search collects unless the caller asks
+// for a different number. One keyword can match a thousand videos, every hit
+// costs a view call for its cid, and search is the endpoint most likely to answer
+// -412 -- so an unbounded default would turn one command into eight minutes of
+// requests and a thousand new rows.
+const DefaultSearchLimit = 50
 
 // Enumerator turns a source (UP主 mid, 收藏夹 media_id or 合集 sid) into the list
 // of its videos with pages/cids resolved. The BaseURL fields are exported so
@@ -37,6 +47,7 @@ type Enumerator struct {
 	FavBaseURL    string
 	ViewBaseURL   string
 	SeasonBaseURL string
+	SearchBaseURL string
 	NavURL        string
 
 	signer *bili.WBISigner
@@ -52,6 +63,7 @@ func NewEnumerator(c *bili.Client) *Enumerator {
 		FavBaseURL:    defaultFavBaseURL,
 		ViewBaseURL:   defaultViewBaseURL,
 		SeasonBaseURL: defaultSeasonBaseURL,
+		SearchBaseURL: defaultSearchBaseURL,
 		NavURL:        defaultNavURL,
 	}
 }
@@ -210,6 +222,63 @@ func (e *Enumerator) EnumerateSeason(ctx context.Context, mid, seasonID string) 
 		}
 		videos = append(videos, infos...)
 		if resp.Page.Total > 0 && len(videos) >= resp.Page.Total {
+			break
+		}
+	}
+	return videos, nil
+}
+
+// EnumerateSearch lists a keyword's video hits, stopping at limit resolved videos
+// (0 means no limit). The cap is a promise about how many rows one run creates,
+// so it cuts the list rather than rounding up to a page boundary.
+//
+// The search response's own title is ignored on purpose: it can carry <em
+// class="keyword"> highlight markup, and every hit needs a view call anyway for
+// the cid -- which brings the clean title, the integer duration (search reports
+// "2:12" as a string) and the 充电 flags with it.
+func (e *Enumerator) EnumerateSearch(ctx context.Context, keyword string, limit int) ([]*bili.VideoInfo, error) {
+	signer, err := e.Signer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var videos []*bili.VideoInfo
+	for page := 1; ; page++ {
+		params, err := signer.Sign(map[string]string{
+			"search_type": "video",
+			"keyword":     keyword,
+			"page":        strconv.Itoa(page),
+			"page_size":   strconv.Itoa(searchPageSize),
+		})
+		if err != nil {
+			return nil, err
+		}
+		var resp struct {
+			NumPages int `json:"numPages"`
+			Result   []struct {
+				Bvid string `json:"bvid"`
+			} `json:"result"`
+		}
+		if err := e.fetchListingPage(ctx, e.SearchBaseURL, params, &resp); err != nil {
+			return nil, err
+		}
+		// An empty page is how the listing really ends; numPages is a claim, and
+		// the endpoint caps out at a thousand results anyway.
+		if len(resp.Result) == 0 {
+			break
+		}
+		bvids := make([]string, 0, len(resp.Result))
+		for _, r := range resp.Result {
+			bvids = append(bvids, r.Bvid)
+		}
+		infos, err := e.resolveAll(ctx, bvids)
+		if err != nil {
+			return nil, err
+		}
+		videos = append(videos, infos...)
+		if limit > 0 && len(videos) >= limit {
+			return videos[:limit], nil
+		}
+		if resp.NumPages > 0 && page >= resp.NumPages {
 			break
 		}
 	}

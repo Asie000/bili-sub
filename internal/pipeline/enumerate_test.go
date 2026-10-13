@@ -48,6 +48,59 @@ func TestParseURLError(t *testing.T) {
 	}
 }
 
+// TestParseURLSearchBeatsBvid pins that a search link is a search, not whatever
+// video id happens to appear in the keyword: the bvid pattern is checked last but
+// a link whose keyword IS a bvid would otherwise silently become a single video.
+func TestParseURLSearchBeatsBvid(t *testing.T) {
+	cases := []struct {
+		in  string
+		key string
+	}{
+		{"https://search.bilibili.com/all?keyword=劳动法", "search:劳动法"},
+		{"https://search.bilibili.com/video?keyword=%E5%8A%B3%E5%8A%A8%E6%B3%95", "search:劳动法"},
+		{"https://search.bilibili.com/all?keyword=劳动法&from_source=webtop_search", "search:劳动法"},
+		{"https://search.bilibili.com/all?keyword=BV1uv411q7Mv", "search:BV1uv411q7Mv"},
+	}
+	for _, c := range cases {
+		kind, key, err := ParseURL(c.in)
+		if err != nil {
+			t.Fatalf("%s: %v", c.in, err)
+		}
+		if kind != KindSearch || key != c.key {
+			t.Fatalf("%s: got (%v,%s) want (search,%s)", c.in, kind, key, c.key)
+		}
+	}
+}
+
+// TestSearchKeyNormalizesWhitespace: the key groups the rows and is what
+// --source filters on, so two spellings of one keyword must not become two
+// sources.
+func TestSearchKeyNormalizesWhitespace(t *testing.T) {
+	cases := map[string]string{
+		"劳动法":    "search:劳动法",
+		" 劳动法 ":  "search:劳动法",
+		"劳动   法": "search:劳动 法",
+		"劳动\t法":  "search:劳动 法",
+	}
+	for in, want := range cases {
+		if got := SearchKey(in); got != want {
+			t.Errorf("SearchKey(%q) = %q, want %q", in, got, want)
+		}
+		keyword, ok := SplitSearchKey(SearchKey(in))
+		if !ok || keyword == "" {
+			t.Errorf("SplitSearchKey(%q) = (%q,%v), want the keyword back", SearchKey(in), keyword, ok)
+		}
+	}
+}
+
+func TestSplitSearchKeyRejectsNonSearchKeys(t *testing.T) {
+	for _, key := range []string{"", "453013730", "BV1uv411q7Mv", "search:", "season:1:2"} {
+		if _, ok := SplitSearchKey(key); ok {
+			t.Errorf("SplitSearchKey(%q) ok = true, want false", key)
+		}
+	}
+}
+
 // TestParseURLSeasonBeatsSpace pins the trap this feature exists to avoid: a
 // 合集 URL starts with space.bilibili.com/<mid>/..., so testing the space
 // pattern first returns the UP主's whole backlog -- 54 videos instead of the 5
@@ -123,6 +176,7 @@ func TestSourceKindString(t *testing.T) {
 		KindSpace:  "space",
 		KindFav:    "fav",
 		KindSeason: "season",
+		KindSearch: "search",
 	}
 	for kind, want := range cases {
 		if got := kind.String(); got != want {
@@ -149,6 +203,9 @@ func TestParseURLForKind(t *testing.T) {
 		{"999", KindFav, "999"},
 		{"https://space.bilibili.com/453013730/channel/collectiondetail?sid=9241496", KindSeason, "season:453013730:9241496"},
 		{"https://space.bilibili.com/453013730/lists/9241496?type=season", KindSeason, "season:453013730:9241496"},
+		{"劳动法", KindSearch, "search:劳动法"},
+		{" 劳动 法 ", KindSearch, "search:劳动 法"},
+		{"https://search.bilibili.com/all?keyword=劳动法", KindSearch, "search:劳动法"},
 	}
 	for _, c := range cases {
 		key, err := ParseURLForKind(c.in, c.kind)
@@ -173,6 +230,8 @@ func TestParseURLForKindError(t *testing.T) {
 		// 合集需要 mid 和 sid 两个号码，只给一个就用不了。
 		{"https://space.bilibili.com/453013730/channel/collectiondetail?sid=9241496", KindSingle},
 		{"https://www.bilibili.com/video/BV1uv411q7Mv", KindSeason},
+		// 搜索需要关键词，空字符串不算。
+		{"", KindSearch},
 	}
 	for _, c := range cases {
 		if key, err := ParseURLForKind(c.in, c.kind); err == nil {
@@ -193,6 +252,7 @@ func TestParseSourceKind(t *testing.T) {
 		{" fav ", KindFav, true},
 		{"season", KindSeason, true},
 		{" Season ", KindSeason, true},
+		{"search", KindSearch, true},
 		{"", 0, false},
 		{"video", 0, false},
 	}
@@ -220,6 +280,9 @@ func TestNewEnumeratorDefaults(t *testing.T) {
 	}
 	if e.SeasonBaseURL != "https://api.bilibili.com/x/polymer/web-space/seasons_archives_list" {
 		t.Fatalf("SeasonBaseURL=%s", e.SeasonBaseURL)
+	}
+	if e.SearchBaseURL != "https://api.bilibili.com/x/web-interface/wbi/search/type" {
+		t.Fatalf("SearchBaseURL=%s", e.SearchBaseURL)
 	}
 }
 
@@ -377,6 +440,130 @@ func TestEnumerateSeason(t *testing.T) {
 	}
 	if got[0] != "mid=453013730 sid=9241496 pn=1 ps=30" {
 		t.Errorf("first request = %q", got[0])
+	}
+}
+
+// TestEnumerateSearch pins the search listing and its limit. One keyword can
+// match a thousand videos, every hit needs a view call for its cid, and the
+// search endpoint is the one most likely to answer -412 -- so a run has to stop
+// at the requested count instead of walking fifty pages.
+func TestEnumerateSearch(t *testing.T) {
+	navSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"code":0,"message":"0","data":{"wbi_img":{"img_url":%q,"sub_url":%q}}}`,
+			"https://i0.hdslb.com/bfs/wbi/"+testImgKey+".png",
+			"https://i0.hdslb.com/bfs/wbi/"+testSubKey+".png")
+	}))
+	defer navSrv.Close()
+
+	viewSrv := httptest.NewServer(http.HandlerFunc(viewHandler))
+	defer viewSrv.Close()
+
+	var mu sync.Mutex
+	var pages []string
+	searchSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("search_type") != "video" {
+			t.Errorf("search_type=%q want video", q.Get("search_type"))
+		}
+		if q.Get("keyword") != "劳动法" {
+			t.Errorf("keyword=%q", q.Get("keyword"))
+		}
+		if q.Get("page_size") != "20" {
+			t.Errorf("page_size=%q", q.Get("page_size"))
+		}
+		// The signature is the difference between this endpoint answering with
+		// JSON and with an HTML 403 page.
+		if q.Get("w_rid") == "" {
+			t.Errorf("search request was not signed: %v", q)
+		}
+		pn := q.Get("page")
+		mu.Lock()
+		pages = append(pages, pn)
+		mu.Unlock()
+		switch pn {
+		case "1":
+			_, _ = w.Write([]byte(`{"code":0,"message":"0","data":{"numPages":3,"result":[{"bvid":"BV1uv411q7Mv"},{"bvid":"BV1uv411q7Mx"}]}}`))
+		case "2":
+			_, _ = w.Write([]byte(`{"code":0,"message":"0","data":{"numPages":3,"result":[{"bvid":"BV1uv411q7My"},{"bvid":"BV1uv411q7Mz"}]}}`))
+		default:
+			t.Errorf("unexpected page %q", pn)
+			_, _ = w.Write([]byte(`{"code":0,"message":"0","data":{"numPages":3,"result":[]}}`))
+		}
+	}))
+	defer searchSrv.Close()
+
+	e := NewEnumerator(bili.NewClient("", nopLimiter{}))
+	e.NavURL = navSrv.URL
+	e.ViewBaseURL = viewSrv.URL
+	e.SearchBaseURL = searchSrv.URL
+
+	// Three is mid-page, which is the case that matters: the limit must cut the
+	// list, not round up to a page boundary.
+	videos, err := e.EnumerateSearch(context.Background(), "劳动法", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(videos) != 3 {
+		t.Fatalf("videos=%d want exactly 3", len(videos))
+	}
+	// Titles come from the view handler, so this also proves each hit went
+	// through ResolveVideo -- the search response carries no cid.
+	for i, want := range []string{"title-BV1uv411q7Mv", "title-BV1uv411q7Mx", "title-BV1uv411q7My"} {
+		if videos[i].Title != want {
+			t.Errorf("videos[%d].Title = %q, want %q", i, videos[i].Title, want)
+		}
+	}
+	mu.Lock()
+	stopped := append([]string(nil), pages...)
+	mu.Unlock()
+	if !reflect.DeepEqual(stopped, []string{"1", "2"}) {
+		t.Fatalf("search pages = %v, want [1 2]: the limit was reached on page 2", stopped)
+	}
+}
+
+// TestEnumerateSearchUnlimited covers --limit 0: every page until the listing
+// itself runs out, whatever numPages claims.
+func TestEnumerateSearchUnlimited(t *testing.T) {
+	navSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"code":0,"message":"0","data":{"wbi_img":{"img_url":%q,"sub_url":%q}}}`,
+			"https://i0.hdslb.com/bfs/wbi/"+testImgKey+".png",
+			"https://i0.hdslb.com/bfs/wbi/"+testSubKey+".png")
+	}))
+	defer navSrv.Close()
+
+	viewSrv := httptest.NewServer(http.HandlerFunc(viewHandler))
+	defer viewSrv.Close()
+
+	var mu sync.Mutex
+	var pages []string
+	searchSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pn := r.URL.Query().Get("page")
+		mu.Lock()
+		pages = append(pages, pn)
+		mu.Unlock()
+		switch pn {
+		case "1":
+			_, _ = w.Write([]byte(`{"code":0,"message":"0","data":{"numPages":99,"result":[{"bvid":"BV1uv411q7Mv"}]}}`))
+		default:
+			// A short final page is how the listing really ends; numPages is a
+			// claim, not a guarantee.
+			_, _ = w.Write([]byte(`{"code":0,"message":"0","data":{"numPages":99,"result":[]}}`))
+		}
+	}))
+	defer searchSrv.Close()
+
+	e := NewEnumerator(bili.NewClient("", nopLimiter{}))
+	e.NavURL = navSrv.URL
+	e.SearchBaseURL = searchSrv.URL
+	e.ViewBaseURL = viewSrv.URL
+
+	if _, err := e.EnumerateSearch(context.Background(), "kw", 0); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !reflect.DeepEqual(pages, []string{"1", "2"}) {
+		t.Fatalf("search pages = %v, want [1 2]: stop at the first empty page", pages)
 	}
 }
 

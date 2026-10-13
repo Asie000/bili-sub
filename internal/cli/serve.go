@@ -13,6 +13,7 @@ import (
 
 	"bilibili-sub/internal/bili"
 	"bilibili-sub/internal/export"
+	"bilibili-sub/internal/pipeline"
 	"bilibili-sub/internal/server"
 	"bilibili-sub/internal/store"
 )
@@ -132,7 +133,7 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 					onProgress(server.Progress{Op: "probe", Done: done, Total: total})
 				}
 			}
-			stats, err := r.probe(ctx, io.Discard, rawURL, kind, force, progress)
+			stats, err := r.probe(ctx, io.Discard, rawURL, kind, force, pipeline.DefaultSearchLimit, progress)
 			if err != nil {
 				return server.ProbeSummary{}, err
 			}

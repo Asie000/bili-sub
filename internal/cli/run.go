@@ -51,6 +51,10 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			limit, err := cmd.Flags().GetInt("limit")
+			if err != nil {
+				return err
+			}
 			formats, err := parseFormats(format)
 			if err != nil {
 				return err
@@ -60,16 +64,17 @@ func newRunCmd() *cobra.Command {
 				return err
 			}
 			defer rt.close()
-			return rt.run(cmd.Context(), cmd.OutOrStdout(), args[0], kindSpec, lang, asrLang, model, transcribe, formats, force, nil)
+			return rt.run(cmd.Context(), cmd.OutOrStdout(), args[0], kindSpec, lang, asrLang, model, transcribe, formats, force, limit, nil)
 		},
 	}
-	cmd.Flags().String("kind", "", "来源类型（single/space/fav），空则按 URL 自动识别")
+	cmd.Flags().String("kind", "", "来源类型（single/space/fav/season/search），空则按 URL 自动识别")
 	cmd.Flags().String("lang", "", "字幕语言（如 zh、en），空则自动选择")
 	cmd.Flags().Bool("transcribe", true, "对无字幕视频启用本地 ASR 转写（--transcribe=false 跳过）")
 	cmd.Flags().String("asr-lang", defaultASRLang, "转写语言：zh 或 en（空则自动检测）")
 	cmd.Flags().String("model", "", "Whisper 模型名（默认取 .env 的 ASR_MODEL）")
 	cmd.Flags().String("format", "srt,txt,json,md", "导出格式，逗号分隔：srt,txt,md,json")
 	cmd.Flags().Bool("force", false, "重新探测已完成（fetched/transcribed/exported）的视频")
+	cmd.Flags().Int("limit", pipeline.DefaultSearchLimit, "搜索来源最多取多少条（0 = 不限）；其他来源忽略此项")
 	return cmd
 }
 
@@ -81,7 +86,7 @@ func newRunCmd() *cobra.Command {
 // cost the user the subtitles that were already downloaded and stored: the
 // archive is still written, and the non-zero exit still says something went
 // wrong.
-func (r *runtime) run(ctx context.Context, out io.Writer, rawURL, kindSpec, lang, asrLang, model string, transcribe bool, formats []string, force bool, onProgress func(done, total int)) error {
+func (r *runtime) run(ctx context.Context, out io.Writer, rawURL, kindSpec, lang, asrLang, model string, transcribe bool, formats []string, force bool, limit int, onProgress func(done, total int)) error {
 	// Resolve the source first: a bad link must fail before anything is written,
 	// and the download leg has to be scoped to it. This mirrors what the HTTP
 	// probe handler does for the same reason.
@@ -102,7 +107,7 @@ func (r *runtime) run(ctx context.Context, out io.Writer, rawURL, kindSpec, lang
 		source = s
 	}
 
-	if _, err := r.probe(ctx, out, rawURL, kindSpec, force, onProgress); err != nil {
+	if _, err := r.probe(ctx, out, rawURL, kindSpec, force, limit, onProgress); err != nil {
 		return err
 	}
 

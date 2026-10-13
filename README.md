@@ -89,6 +89,7 @@ uv pip install --python .asr-venv/Scripts/python.exe faster-whisper "av<19"
 - 网页端也能选：勾上「无字幕时转写」后，旁边的**转写语言**和**模型**输入框会解锁；留空则用 `.env` 的 `ASR_MODEL`。转写在导出之前跑，转写失败**不会丢掉已下载的字幕**（导出照常，页面给出带计数的警告）。
 - 音频接口要求登录态：匿名请求 `playurl` 会得到 `-101 账号未登录`，先跑 `bili-sub login`。
 - **合集也能抓**：直接粘合集链接（`space.bilibili.com/<mid>/channel/collectiondetail?sid=<sid>`，或新的 `.../lists/<sid>?type=season`）。粘**单视频**链接时，若它属于某个合集，会提示「这条视频属于合集《X》，共 N 条」并给出可粘贴的合集链接（命令行和网页都会提示；默认**不**自动把 31 条都抓下来）。视频选集（series）暂不支持，会明确报错。
+- **也能按关键词搜**：`bili-sub probe --kind search --limit 20 劳动法`（网页端来源类型选「搜索关键词」）。搜索是**登录接口**。一个词最多能出 1000 条、每条还要再查一次，所以默认**只取 50 条**，用 `--limit` 改（`--limit 0` = 不限）。抓完用 `download --source search:劳动法` 接着跑。
 - **Ctrl+C 是优雅退出**：中途按 Ctrl+C 会停下来、**不把在途视频标成失败**、临时音频文件也删掉（第一次 Ctrl+C 取消，第二次恢复默认行为立刻退出）。中途音频目录 `data/audio/` 由 `transcribe` 每次开始时清理，所以被硬杀（关终端/断电）也不会越积越多。
 
 ---
