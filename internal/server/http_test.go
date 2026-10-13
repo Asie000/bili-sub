@@ -657,6 +657,47 @@ func TestQRCodeEndpointReturnsURL(t *testing.T) {
 	}
 }
 
+// TestHubCloseEndsEveryStream pins the primitive the shutdown relies on: Close
+// ends the subscriptions (that is what makes an SSE handler return), it is safe to
+// call twice, a subscriber's own cancel afterwards must not panic on an already
+// closed channel, and a handler arriving mid-shutdown is not left hanging.
+func TestHubCloseEndsEveryStream(t *testing.T) {
+	hub := NewHub()
+	first, cancelFirst := hub.Subscribe()
+	second, _ := hub.Subscribe()
+
+	hub.Close()
+	hub.Close() // idempotent
+
+	for i, ch := range []chan Event{first, second} {
+		select {
+		case _, open := <-ch:
+			if open {
+				t.Errorf("subscription %d delivered an event after Close", i)
+			}
+		case <-time.After(time.Second):
+			t.Errorf("subscription %d was not closed by Close", i)
+		}
+	}
+	// In the real handler this runs from a defer, so it happens after Close.
+	cancelFirst()
+
+	late, lateCancel := hub.Subscribe()
+	defer lateCancel()
+	select {
+	case _, open := <-late:
+		if open {
+			t.Error("a subscriber registered after Close got an event")
+		}
+	case <-time.After(time.Second):
+		t.Error("a subscriber registered after Close was left waiting")
+	}
+
+	// Broadcast walks the subscriber map; an empty one after Close means it must
+	// not reach a closed channel.
+	hub.Broadcast(Event{Type: "probe"})
+}
+
 func TestEventsEndpointStreamsBroadcast(t *testing.T) {
 	hub := NewHub()
 	s := newTestServer(t, Options{Hub: hub})

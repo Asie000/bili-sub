@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -281,6 +283,76 @@ func TestServeStopsWhenTheProcessIsAskedToStop(t *testing.T) {
 	}
 }
 
+// TestServeShutsDownWithAnOpenSSEStream pins the shutdown path with a browser
+// watching. http.Server.Shutdown closes idle connections and then waits for the
+// active ones, and it never cancels request contexts -- so the SSE handler, which
+// only returns when its subscription ends, would hold the server "active" for the
+// whole grace period and turn every Ctrl+C into a timeout error.
+func TestServeShutsDownWithAnOpenSSEStream(t *testing.T) {
+	// A port the OS just handed out, so the test knows where to connect.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	rt := newTestRuntime(t)
+	defer rt.close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- rt.serve(ctx, io.Discard, addr) }()
+
+	base := "http://" + addr
+	waitForServer(t, base)
+
+	// Hold the event stream open, the way a browser page does from the moment it
+	// loads. The body is deliberately left open until the end of the test.
+	stream, err := http.Get(base + "/api/events")
+	if err != nil {
+		t.Fatalf("open SSE stream: %v", err)
+	}
+	defer stream.Body.Close()
+	if stream.StatusCode != http.StatusOK {
+		t.Fatalf("SSE status = %d, want 200", stream.StatusCode)
+	}
+
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("serve returned %v after Ctrl+C, want a clean stop", err)
+		}
+		if elapsed := time.Since(start); elapsed > serveShutdownTimeout/2 {
+			t.Errorf("serve took %v to stop with a stream open, want much less than the %v grace period", elapsed, serveShutdownTimeout)
+		}
+	case <-time.After(serveShutdownTimeout * 2):
+		t.Fatal("serve did not stop while an SSE stream was open: Ctrl+C would appear to hang")
+	}
+}
+
+// waitForServer polls until the listener answers, so the test does not depend on
+// a sleep long enough for the slowest machine.
+func waitForServer(t *testing.T, base string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(base + "/")
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("server never came up")
+}
+
+// CLI-side probe computes the 合集 hint, and the browser only ever sees what the
+// seam puts into the summary. Dropping it here is invisible from either end.
 // TestServeProbeSeamCarriesTheSeasonHint pins the mapping across the seam: the
 // CLI-side probe computes the 合集 hint, and the browser only ever sees what the
 // seam puts into the summary. Dropping it here is invisible from either end.

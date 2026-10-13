@@ -100,18 +100,28 @@ var (
 	reBvid = regexp.MustCompile(`BV[0-9A-Za-z]{10}`)
 	// Search links carry the keyword, so they must be tested before the bvid
 	// pattern: a link whose keyword happens to be a bvid is a search, not a video.
-	reSearchURL      = regexp.MustCompile(`search\.bilibili\.com/[^ ]*[?&]keyword=([^&#]+)`)
-	reSpaceSeries    = regexp.MustCompile(`space\.bilibili\.com/(\d+)/channel/seriesdetail\?(?:[^#]*[?&])?sid=(\d+)`)
-	reSpaceSeason    = regexp.MustCompile(`space\.bilibili\.com/(\d+)/channel/collectiondetail\?(?:[^#]*[?&])?sid=(\d+)`)
-	reSpaceLists     = regexp.MustCompile(`space\.bilibili\.com/(\d+)/lists/(\d+)`)
-	reSeasonPair     = regexp.MustCompile(`^(\d+)[:,](\d+)$`)
-	reSpaceMid       = regexp.MustCompile(`space\.bilibili\.com/(\d+)`)
-	reMedialistPlay  = regexp.MustCompile(`medialist/play/(\d+)`)
-	reMediaID        = regexp.MustCompile(`media_id=(\d+)`)
-	reMedialistFavID = regexp.MustCompile(`medialist/detail/ml(\d+)`)
-	reFavMl          = regexp.MustCompile(`ml(\d+)`)
-	reFavFid         = regexp.MustCompile(`fid=(\d+)`)
-	reDigitsOnly     = regexp.MustCompile(`^\d+$`)
+	reSearchURL = regexp.MustCompile(`search\.bilibili\.com/[^ ]*[?&]keyword=([^&#]+)`)
+	// reSpaceSeriesPage matches any series page, with or without a usable sid:
+	// knowing it is a 选集 is enough to say so instead of guessing.
+	reSpaceSeriesPage = regexp.MustCompile(`space\.bilibili\.com/\d+/channel/seriesdetail`)
+	// reSpaceChannel matches any UP主 channel page. A channel link that the
+	// specific patterns below do not cover is a 合集/选集 we failed to parse, and
+	// saying so beats letting it fall through to the space pattern.
+	reSpaceChannel = regexp.MustCompile(`space\.bilibili\.com/\d+/channel/`)
+	// reOldCollectionForm is the pre-合集 `medialist/play/<mid>?business=space_collection
+	// &business_id=<sid>` link. It carries both ids but in a shape this parser does
+	// not read, so it gets its own message rather than the silent space fallback.
+	reOldCollectionForm = regexp.MustCompile(`business=space_collection`)
+	reSpaceSeason       = regexp.MustCompile(`space\.bilibili\.com/(\d+)/channel/collectiondetail\?(?:[^#]*[?&])?sid=(\d+)`)
+	reSpaceLists        = regexp.MustCompile(`space\.bilibili\.com/(\d+)/lists/(\d+)`)
+	reSeasonPair        = regexp.MustCompile(`^(\d+)[:,](\d+)$`)
+	reSpaceMid          = regexp.MustCompile(`space\.bilibili\.com/(\d+)`)
+	reMedialistPlay     = regexp.MustCompile(`medialist/play/(\d+)`)
+	reMediaID           = regexp.MustCompile(`media_id=(\d+)`)
+	reMedialistFavID    = regexp.MustCompile(`medialist/detail/ml(\d+)`)
+	reFavMl             = regexp.MustCompile(`ml(\d+)`)
+	reFavFid            = regexp.MustCompile(`fid=(\d+)`)
+	reDigitsOnly        = regexp.MustCompile(`^\d+$`)
 )
 
 // ParseURL accepts a bilibili video/UP主/收藏夹/合集 URL (with or without
@@ -128,17 +138,12 @@ func ParseURL(raw string) (SourceKind, string, error) {
 	if keyword, ok := parseSearchURL(s); ok {
 		return KindSearch, SearchKey(keyword), nil
 	}
-	if m := reSpaceSeries.FindStringSubmatch(s); m != nil {
-		return 0, "", seriesUnsupported(raw)
-	}
-	if m := reSpaceSeason.FindStringSubmatch(s); m != nil {
-		return KindSeason, SeasonKey(m[1], m[2]), nil
-	}
-	if m := reSpaceLists.FindStringSubmatch(s); m != nil {
-		if strings.Contains(s, "type=series") {
-			return 0, "", seriesUnsupported(raw)
+	if isSeasonLike(s) {
+		key, err := parseSeasonKey(raw)
+		if err != nil {
+			return 0, "", err
 		}
-		return KindSeason, SeasonKey(m[1], m[2]), nil
+		return KindSeason, key, nil
 	}
 	if m := reMediaID.FindStringSubmatch(s); m != nil {
 		return KindFav, m[1], nil
@@ -156,6 +161,46 @@ func ParseURL(raw string) (SourceKind, string, error) {
 		return KindSingle, m, nil
 	}
 	return 0, "", fmt.Errorf("unrecognized bilibili url or id: %q", raw)
+}
+
+// isSeasonLike reports whether the input is a 合集/选集 attempt at all. Anything
+// it accepts but parseSeasonKey cannot read gets an error, never the space
+// fallback: a wrong answer the user cannot notice is worse than a refusal.
+func isSeasonLike(s string) bool {
+	return reSpaceSeason.MatchString(s) || reSpaceLists.MatchString(s) ||
+		reSpaceSeriesPage.MatchString(s) || reSpaceChannel.MatchString(s) ||
+		reOldCollectionForm.MatchString(s) || reSeasonPair.MatchString(s)
+}
+
+// parseSeasonKey is the single implementation of "what 合集 is this link?", shared
+// by ParseURL and ParseURLForKind. They used to have their own copies of the
+// patterns, and the explicit-kind one was missing the 选集 guard -- so
+// `--kind season <series link>` quietly produced a season key.
+func parseSeasonKey(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if reSpaceSeriesPage.MatchString(s) || strings.Contains(s, "type=series") {
+		return "", seriesUnsupported(raw)
+	}
+	if reOldCollectionForm.MatchString(s) {
+		return "", fmt.Errorf("这是旧版「合集」链接（medialist/play?...business=space_collection），暂不识别：%q；请用 %s 形式",
+			raw, SeasonURL("<mid>", "<sid>"))
+	}
+	if m := reSpaceSeason.FindStringSubmatch(s); m != nil {
+		return SeasonKey(m[1], m[2]), nil
+	}
+	if m := reSpaceLists.FindStringSubmatch(s); m != nil {
+		return SeasonKey(m[1], m[2]), nil
+	}
+	// 合集需要两个号码，所以也接受直接写出来："453013730:9241496"。
+	if m := reSeasonPair.FindStringSubmatch(s); m != nil {
+		return SeasonKey(m[1], m[2]), nil
+	}
+	if reSpaceChannel.MatchString(s) {
+		return "", fmt.Errorf("识别到合集/选集页面，但没能从中取出 mid 和 sid：%q（请用带 sid= 的完整链接，例如 %s）",
+			raw, SeasonURL("<mid>", "<sid>"))
+	}
+	return "", fmt.Errorf("无法从 %q 解析合集（需要 UP主 mid 和合集 sid，例如 %s）",
+		raw, SeasonURL("<mid>", "<sid>"))
 }
 
 // seriesUnsupported names a 视频选集 instead of guessing at it. The two look
@@ -227,18 +272,7 @@ func ParseURLForKind(raw string, kind SourceKind) (string, error) {
 		}
 		return "", fmt.Errorf("无法从 %q 解析收藏夹 id", raw)
 	case KindSeason:
-		if m := reSpaceSeason.FindStringSubmatch(s); m != nil {
-			return SeasonKey(m[1], m[2]), nil
-		}
-		if m := reSpaceLists.FindStringSubmatch(s); m != nil {
-			return SeasonKey(m[1], m[2]), nil
-		}
-		// 合集需要两个号码，所以也接受直接写出来："453013730:9241496"。
-		if m := reSeasonPair.FindStringSubmatch(s); m != nil {
-			return SeasonKey(m[1], m[2]), nil
-		}
-		return "", fmt.Errorf("无法从 %q 解析合集（需要 UP主 mid 和合集 sid，例如 %s）",
-			raw, SeasonURL("<mid>", "<sid>"))
+		return parseSeasonKey(raw)
 	case KindSearch:
 		// A keyword is not a URL, and it is also accepted as a search link so a
 		// user can paste either one.

@@ -20,35 +20,54 @@ const subscriberBuffer = 16
 // use by HTTP handlers and pipeline callbacks. The zero value is a usable hub
 // with no subscribers, so Options{Hub: &Hub{}} cannot panic.
 type Hub struct {
-	mu   sync.Mutex
-	subs map[chan Event]struct{}
+	mu     sync.Mutex
+	subs   map[*subscriber]struct{}
+	closed bool
+}
+
+// subscriber is one SSE stream. Closing its channel is what tells the handler to
+// return, and it has to happen exactly once -- both the client leaving and a
+// shutdown close it, and a double close would panic.
+type subscriber struct {
+	ch   chan Event
+	once sync.Once
+}
+
+func (s *subscriber) stop() {
+	s.once.Do(func() { close(s.ch) })
 }
 
 func NewHub() *Hub {
-	return &Hub{subs: make(map[chan Event]struct{})}
+	return &Hub{subs: make(map[*subscriber]struct{})}
 }
 
 // Subscribe registers a listener and returns its channel plus the cancel func
-// that unregisters it and closes the channel. cancel is idempotent.
+// that unregisters it and closes the channel. cancel is idempotent, and safe to
+// call after Close. A hub that is already closed hands back a closed channel, so
+// a handler that arrives during shutdown returns instead of waiting forever.
 func (h *Hub) Subscribe() (chan Event, func()) {
-	ch := make(chan Event, subscriberBuffer)
+	sub := &subscriber{ch: make(chan Event, subscriberBuffer)}
 	h.mu.Lock()
-	if h.subs == nil {
-		h.subs = make(map[chan Event]struct{})
+	if h.closed {
+		h.mu.Unlock()
+		sub.stop()
+		return sub.ch, func() {}
 	}
-	h.subs[ch] = struct{}{}
+	if h.subs == nil {
+		h.subs = make(map[*subscriber]struct{})
+	}
+	h.subs[sub] = struct{}{}
 	h.mu.Unlock()
 
-	var once sync.Once
 	cancel := func() {
-		once.Do(func() {
-			h.mu.Lock()
-			delete(h.subs, ch)
-			close(ch)
-			h.mu.Unlock()
-		})
+		h.mu.Lock()
+		delete(h.subs, sub)
+		h.mu.Unlock()
+		// Closing outside the lock is safe because Broadcast only ever sends to
+		// channels still in the map, and this removes it first.
+		sub.stop()
 	}
-	return ch, cancel
+	return sub.ch, cancel
 }
 
 // Broadcast delivers ev to every subscriber, dropping the event for any
@@ -57,10 +76,26 @@ func (h *Hub) Subscribe() (chan Event, func()) {
 func (h *Hub) Broadcast(ev Event) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for ch := range h.subs {
+	for sub := range h.subs {
 		select {
-		case ch <- ev:
+		case sub.ch <- ev:
 		default:
 		}
+	}
+}
+
+// Close ends every subscription and refuses new ones. It exists for shutdown:
+// http.Server.Shutdown closes idle connections and then waits for the active
+// ones, and it never cancels request contexts, so an open /api/events stream
+// keeps the server "active" until the grace period runs out. Closing the streams
+// first is what makes Ctrl+C with a browser page open shut down immediately.
+// Close is idempotent.
+func (h *Hub) Close() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.closed = true
+	for sub := range h.subs {
+		delete(h.subs, sub)
+		sub.stop()
 	}
 }

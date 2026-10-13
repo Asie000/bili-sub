@@ -157,6 +157,40 @@ func TestSplitSeasonKeyRejectsNonSeasonKeys(t *testing.T) {
 	}
 }
 
+// TestParseURLForKindKeepsTheSeriesGuard: ParseURL rejects a 视频选集 because the
+// endpoint that lists one is a different one, but the explicit-kind path only
+// copied the regexes -- so `--kind season <series link>` (or the web's 合集 option,
+// the closest one on offer) quietly produced a season key and would have asked the
+// season endpoint about a series id instead of saying it is unsupported.
+func TestParseURLForKindKeepsTheSeriesGuard(t *testing.T) {
+	for _, in := range []string{
+		"https://space.bilibili.com/453013730/channel/seriesdetail?sid=123",
+		"https://space.bilibili.com/453013730/lists/123?type=series",
+	} {
+		if key, err := ParseURLForKind(in, KindSeason); err == nil {
+			t.Errorf("ParseURLForKind(%q, season) = %q, want an error naming 视频选集", in, key)
+		}
+	}
+}
+
+// TestParseURLRejectsUnrecognizedChannelLinks pins that a channel link the
+// dedicated patterns do not cover does not fall through to the space pattern.
+// space.bilibili.com/<mid>/channel/... is a 合集 or a 选集, and treating it as "the
+// UP主's whole backlog" is exactly the silent 54-videos-instead-of-5 bug this
+// feature exists to kill -- a wrong answer the user has no way to notice.
+func TestParseURLRejectsUnrecognizedChannelLinks(t *testing.T) {
+	for _, in := range []string{
+		"https://space.bilibili.com/453013730/channel/collectiondetail/?sid=9241496",
+		"https://space.bilibili.com/453013730/channel/seriesdetail?sid=xyz",
+		"https://space.bilibili.com/453013730/channel/seriesdetail",
+	} {
+		kind, key, err := ParseURL(in)
+		if err == nil {
+			t.Errorf("ParseURL(%q) = (%v,%s), want an error rather than the UP主's space", in, kind, key)
+		}
+	}
+}
+
 // TestParseURLSeriesIsNamedNotSilentlyWrong: a 视频选集 is not a 合集 and has no
 // enumerator yet. Saying so is the whole point -- falling through to the space
 // pattern would download the UP主's entire backlog instead.

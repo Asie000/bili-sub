@@ -74,7 +74,8 @@ func (r *runtime) serve(ctx context.Context, out io.Writer, addr string) error {
 	if err != nil {
 		return err
 	}
-	srv := server.New(r.serveOptions(st, server.NewHub()))
+	hub := server.NewHub()
+	srv := server.New(r.serveOptions(st, hub))
 
 	display := addr
 	if strings.HasPrefix(display, ":") {
@@ -96,15 +97,20 @@ func (r *runtime) serve(ctx context.Context, out io.Writer, addr string) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		// Let the request in flight finish, then stop. The wait is short
-		// because a download leg can take minutes and a second Ctrl+C (main
-		// restores the default handler on the first one) still exits
-		// immediately.
+		// End the SSE streams first. Shutdown closes idle connections and then
+		// waits for the active ones without ever cancelling request contexts, so a
+		// browser page holding /api/events open would keep the server "active" for
+		// the whole grace period -- every Ctrl+C would take five seconds and be
+		// reported as a timeout error.
+		hub.Close()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), serveShutdownTimeout)
 		defer cancel()
 		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			// Something was still in flight when the grace period ran out. Cut it
+			// off, say so, and still treat the stop as the normal exit it is.
 			_ = httpSrv.Close()
-			return err
+			fmt.Fprintf(out, "Web 界面已停止（有请求未在 %v 内结束，已强制断开）：%v\n", serveShutdownTimeout, err)
+			return nil
 		}
 		// Unlike probe/download/transcribe, where a cancellation must not look
 		// like a clean run, stopping this server is the documented, normal way
