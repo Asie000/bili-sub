@@ -159,7 +159,7 @@ uv pip install --python .asr-venv/Scripts/python.exe faster-whisper "av<19"
 ### 阶段五（加分项）：Web 看板与 CLI 打包
 > **目标**：为项目锦上添花，感受 Go 托管静态前端的便利。
 
-- [ ] **Task 5.1**：用 Cobra 封装命令：`bili-sub run --uid 12345`、`bili-sub status`、`bili-sub retry`。
+- [x] **Task 5.1**：用 Cobra 封装命令：`bili-sub run <url>`、`bili-sub status`、`bili-sub retry`。
 - [ ] **Task 5.2**：Go 标准库启动简易 HTTP 服务，暴露任务列表与统计接口。
 - [ ] **Task 5.3**：（可选）Vue 3 编写极简看板，由 Go 的 `embed.FS` 嵌入打包成单个独立 `.exe`。
 

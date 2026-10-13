@@ -35,6 +35,7 @@ func NewRootCmd() *cobra.Command {
 
 	root.AddCommand(
 		newLoginCmd(),
+		newRunCmd(),
 		newProbeCmd(),
 		newDownloadCmd(),
 		newTranscribeCmd(),

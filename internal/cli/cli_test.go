@@ -84,7 +84,7 @@ func TestRootHasCommands(t *testing.T) {
 // the brief's TestRootHasCommands only samples six of the nine.
 func TestRootRegistersAllCommands(t *testing.T) {
 	root := NewRootCmd()
-	want := []string{"download", "export", "login", "probe", "reset", "retry", "serve", "status", "transcribe"}
+	want := []string{"download", "export", "login", "probe", "reset", "retry", "run", "serve", "status", "transcribe"}
 	got := map[string]bool{}
 	for _, c := range root.Commands() {
 		got[c.Name()] = true

@@ -254,6 +254,7 @@ IR 始终保留时间轴；**渲染 txt/json/md 时丢弃时间轴**，渲染 sr
 | 命令 | 作用 |
 |---|---|
 | `bili-sub login` | 手填 SESSDATA 或扫码；持久化 |
+| `bili-sub run <url>` | 一条命令跑完：枚举 → 探测 → 下载 → 转写 → 导出 |
 | `bili-sub probe <url>` | 枚举来源并探测字幕可用性（不下载） |
 | `bili-sub download` | 下载可下字幕；`--transcribe` 启用 ASR |
 | `bili-sub transcribe` | 单独对 `no_subtitle` 视频转写 |
