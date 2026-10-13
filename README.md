@@ -73,7 +73,16 @@ uv pip install --python .asr-venv/Scripts/python.exe faster-whisper "av<19"
 - 然后在 `.env` 里设 `PYTHON_PATH=<仓库>\.asr-venv\Scripts\python.exe`（系统默认 Python 若是 3.13+ 会装不上 faster-whisper）。
 - ⚠️ 切勿把 venv 放进 `data/`：`bili-sub reset --yes` 执行的是 `os.RemoveAll(dataDir)`，会把整个 Python 环境和已装依赖一起删掉。
 - GPU 可选：`uv pip install --python .asr-venv/Scripts/python.exe nvidia-cublas-cu12 nvidia-cudnn-cu12` 后 worker 自动走 `cuda/float16`；没装 CUDA 运行库也不影响，会自动降级 `cpu/int8`。（同一台 4060、同一段 268 秒音频、`small` 模型：GPU float16 24 秒，CPU int8 8 分 16 秒，约 20 倍。）
-- 首次运行自动下载模型；中文至少 `small`，追求质量用 `large-v3-turbo`（`tiny` 只适合冒烟测试）。
+- **模型怎么选**（实测，RTX 4060 Laptop，同一段 268 秒中文音频）：
+
+  | 模型 | GPU float16 | 段数 | 质量 |
+  |---|---|---|---|
+  | `tiny` | 12 秒 | 199 | 差（「二十二水双鸡本科毕业」），只适合冒烟测试 |
+  | `small` | 23 秒 | 164 | 一般 |
+  | `large-v3-turbo` | **25 秒** | 108 | 明显更好 |
+
+  turbo 比 small 只慢 2 秒，但每处不一致几乎都是 turbo 对（月入/跃入、清北/青北、被裁/备财、没背景没资源/没被解为资源、几点/级点），断句也更整。**有 GPU 就用 turbo**。
+  纯 CPU 上 `small` int8 已是 8 分 16 秒，turbo 只会更慢，所以 CPU 用户先留在 `small`。
 - **模型名写一次就行**：在 `.env` 里设 `ASR_MODEL=large-v3-turbo`，`transcribe` / `download --transcribe` / 网页端都生效；临时换用 `--model` 覆盖。优先级：`--model` > `ASR_MODEL` > worker 默认（`small`）。不设 `ASR_MODEL` 时不会自动下载大模型，避免新环境一上手就拉几个 GB。
 - **输出会先洗一遍**（在 Go 侧做，对所有后端生效）：去掉 Whisper 漏出的 `<\|0.00\|>` 类特殊标记、丢掉乱码段和空段、去掉汉字之间多余的空格、**合并连续重复段**（静音/音乐上 Whisper 会卡住重复同一句，这是最常见的幻觉）、繁体转简体。保留繁体用 `ASR_SIMPLIFY=0`。
   - 实测（同一段 268 秒音频）：`tiny` 原始输出有 **175 种繁体字**，清理后 0 种；`small` 本来就不带繁体——所以繁体主要是**小模型**的问题。
