@@ -30,6 +30,9 @@ func TestDefault(t *testing.T) {
 	if c.ASRModel != "" {
 		t.Errorf("ASRModel = %q, want empty so the worker's own default applies", c.ASRModel)
 	}
+	if !c.ASRSimplify {
+		t.Error("ASRSimplify = false, want true so a Mandarin transcript is not left half in traditional")
+	}
 	if c.SESSDATA != "" {
 		t.Errorf("SESSDATA = %q, want empty", c.SESSDATA)
 	}
@@ -37,7 +40,7 @@ func TestDefault(t *testing.T) {
 
 // envKeys are every variable Load consults; clearing them keeps each case
 // independent of the developer's real environment.
-var envKeys = []string{"SESSDATA", "BILI_CONCURRENCY", "BILI_QPS", "FFMPEG_PATH", "PYTHON_PATH", "BILI_DATA_DIR", "ASR_MODEL"}
+var envKeys = []string{"SESSDATA", "BILI_CONCURRENCY", "BILI_QPS", "FFMPEG_PATH", "PYTHON_PATH", "BILI_DATA_DIR", "ASR_MODEL", "ASR_SIMPLIFY"}
 
 func TestLoad(t *testing.T) {
 	tests := []struct {
@@ -58,6 +61,7 @@ func TestLoad(t *testing.T) {
 				"FFMPEG_PATH=C:/tools/ffmpeg.exe",
 				"PYTHON_PATH=python3",
 				"ASR_MODEL=small",
+				"ASR_SIMPLIFY=false",
 			}, "\n"),
 			want: &Config{
 				SESSDATA:    "sess-value",
@@ -68,6 +72,7 @@ func TestLoad(t *testing.T) {
 				FFmpegPath:  "C:/tools/ffmpeg.exe",
 				PythonPath:  "python3",
 				ASRModel:    "small",
+				ASRSimplify: false,
 			},
 		},
 		{
@@ -86,6 +91,7 @@ func TestLoad(t *testing.T) {
 				QPS:         4.5,
 				FFmpegPath:  "file-ffmpeg",
 				PythonPath:  "python",
+				ASRSimplify: true,
 			},
 		},
 		{
@@ -101,7 +107,13 @@ func TestLoad(t *testing.T) {
 				FFmpegPath:  "ffmpeg",
 				PythonPath:  "python",
 				ASRModel:    "large-v3-turbo",
+				ASRSimplify: true,
 			},
+		},
+		{
+			name:    "malformed simplify",
+			envFile: "ASR_SIMPLIFY=yep\n",
+			wantErr: "ASR_SIMPLIFY",
 		},
 		{
 			name:    "malformed concurrency in file",

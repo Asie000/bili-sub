@@ -56,6 +56,11 @@ func TestLiveTranscribe(t *testing.T) {
 	cfg.DataDir = dir
 	cfg.DBPath = filepath.Join(dir, "bili_sub.db")
 	cfg.PythonPath = pythonPath
+	// BILI_LIVE_SIMPLIFY=0 keeps the raw model output, so one clip can be run
+	// twice to see what the Chinese cleanup actually changed.
+	if os.Getenv("BILI_LIVE_SIMPLIFY") == "0" {
+		cfg.ASRSimplify = false
+	}
 	rt := &runtime{cfg: cfg}
 	defer rt.close()
 

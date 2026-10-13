@@ -20,6 +20,12 @@ type Config struct {
 	// worker script pick", so a fresh checkout does not silently download a
 	// multi-gigabyte model on its first run.
 	ASRModel string
+	// ASRSimplify folds traditional Chinese characters to simplified in the ASR
+	// output. On by default, because the smaller whisper models render Mandarin
+	// in traditional characters often enough to make the transcript look wrong
+	// (measured on one 268s clip: tiny emitted 175 distinct traditional forms,
+	// small none). Turn it off to keep a genuinely traditional transcript.
+	ASRSimplify bool
 }
 
 func Default() *Config {
@@ -31,6 +37,7 @@ func Default() *Config {
 		QPS:         2,
 		FFmpegPath:  "ffmpeg",
 		PythonPath:  "python",
+		ASRSimplify: true,
 	}
 }
 
@@ -69,7 +76,7 @@ func Load(envPath string) (*Config, error) {
 }
 
 func (c *Config) applyEnv() error {
-	for _, k := range []string{"SESSDATA", "BILI_CONCURRENCY", "BILI_QPS", "FFMPEG_PATH", "PYTHON_PATH", "BILI_DATA_DIR", "ASR_MODEL"} {
+	for _, k := range []string{"SESSDATA", "BILI_CONCURRENCY", "BILI_QPS", "FFMPEG_PATH", "PYTHON_PATH", "BILI_DATA_DIR", "ASR_MODEL", "ASR_SIMPLIFY"} {
 		if v := os.Getenv(k); v != "" {
 			if err := c.set(k, v); err != nil {
 				return fmt.Errorf("config %s: %w", k, err)
@@ -104,6 +111,12 @@ func (c *Config) set(k, v string) error {
 		c.PythonPath = v
 	case "ASR_MODEL":
 		c.ASRModel = v
+	case "ASR_SIMPLIFY":
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return err
+		}
+		c.ASRSimplify = b
 	}
 	return nil
 }

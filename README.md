@@ -75,6 +75,8 @@ uv pip install --python .asr-venv/Scripts/python.exe faster-whisper "av<19"
 - GPU 可选：`uv pip install --python .asr-venv/Scripts/python.exe nvidia-cublas-cu12 nvidia-cudnn-cu12` 后 worker 自动走 `cuda/float16`；没装 CUDA 运行库也不影响，会自动降级 `cpu/int8`。（同一台 4060、同一段 268 秒音频、`small` 模型：GPU float16 24 秒，CPU int8 8 分 16 秒，约 20 倍。）
 - 首次运行自动下载模型；中文至少 `small`，追求质量用 `large-v3-turbo`（`tiny` 只适合冒烟测试）。
 - **模型名写一次就行**：在 `.env` 里设 `ASR_MODEL=large-v3-turbo`，`transcribe` / `download --transcribe` / 网页端都生效；临时换用 `--model` 覆盖。优先级：`--model` > `ASR_MODEL` > worker 默认（`small`）。不设 `ASR_MODEL` 时不会自动下载大模型，避免新环境一上手就拉几个 GB。
+- **输出会先洗一遍**（在 Go 侧做，对所有后端生效）：去掉 Whisper 漏出的 `<\|0.00\|>` 类特殊标记、丢掉乱码段和空段、去掉汉字之间多余的空格、**合并连续重复段**（静音/音乐上 Whisper 会卡住重复同一句，这是最常见的幻觉）、繁体转简体。保留繁体用 `ASR_SIMPLIFY=0`。
+  - 实测（同一段 268 秒音频）：`tiny` 原始输出有 **175 种繁体字**，清理后 0 种；`small` 本来就不带繁体——所以繁体主要是**小模型**的问题。
 - 音频接口要求登录态：匿名请求 `playurl` 会得到 `-101 账号未登录`，先跑 `bili-sub login`。
 
 ---

@@ -652,3 +652,62 @@ func TestTranscribeModelSelection(t *testing.T) {
 		}
 	})
 }
+
+// transcribeSrt runs the ASR leg over one seeded video with the given backend
+// output and returns the .srt it wrote.
+func transcribeSrt(t *testing.T, segments []ir.Segment) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("BILI_DATA_DIR", dir)
+	seedVideoRow(t, dir, store.Video{
+		Bvid: "BV1nosubtitle", Cid: 77, Author: "某UP", Title: "无字幕视频",
+		State: store.StateNoSubtitle,
+	})
+	overrideAudioPipeline(t, newAudioServer(t).URL)
+	overrideASRBackend(t, &fakeASR{segments: segments}, nil)
+
+	if out, err := executeOut(t, "transcribe"); err != nil {
+		t.Fatalf("transcribe: %v\n%s", err, out)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "subtitles", "某UP - 无字幕视频 [BV1nosubtitle].srt"))
+	if err != nil {
+		t.Fatalf("read srt: %v", err)
+	}
+	return string(body)
+}
+
+// TestTranscribeCleansTheBackendOutput pins that cleanup happens on the caller's
+// side of the ASR seam: raw model output reaches the .srt as readable text, so a
+// backend that leaks tokens or loops on silence cannot put that in the file.
+func TestTranscribeCleansTheBackendOutput(t *testing.T) {
+	t.Setenv("ASR_SIMPLIFY", "true")
+	got := transcribeSrt(t, []ir.Segment{
+		{StartMs: 0, EndMs: 900, Text: "<|0.00|>鐵飯碗"},
+		{StartMs: 900, EndMs: 1800, Text: "鐵飯碗。"},
+		{StartMs: 1800, EndMs: 2700, Text: "謝謝大家"},
+	})
+
+	if strings.Contains(got, "<|") {
+		t.Errorf("srt still carries a whisper token:\n%s", got)
+	}
+	if strings.Contains(got, "鐵") {
+		t.Errorf("srt is still traditional:\n%s", got)
+	}
+	if n := strings.Count(got, "铁饭碗"); n != 1 {
+		t.Errorf("铁饭碗 appears %d times, want the repeated line collapsed:\n%s", n, got)
+	}
+	if !strings.Contains(got, "谢谢大家") {
+		t.Errorf("srt lost the line after the repeat:\n%s", got)
+	}
+}
+
+// TestTranscribeKeepsTraditionalWhenSimplifyIsOff pins the escape hatch for
+// content that really is in traditional characters.
+func TestTranscribeKeepsTraditionalWhenSimplifyIsOff(t *testing.T) {
+	t.Setenv("ASR_SIMPLIFY", "0")
+	got := transcribeSrt(t, []ir.Segment{{StartMs: 0, EndMs: 900, Text: "鐵飯碗"}})
+
+	if !strings.Contains(got, "鐵飯碗") {
+		t.Errorf("srt = %q, want the traditional text left alone when ASR_SIMPLIFY is off", got)
+	}
+}

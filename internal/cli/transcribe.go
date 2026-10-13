@@ -192,6 +192,13 @@ func (r *runtime) transcribeOne(ctx context.Context, st *store.Store, fetcher *p
 	if err != nil {
 		return err
 	}
+	// The backend returns raw model output. Cleanup lives here, on the caller's
+	// side of the seam, so every backend gets the same subtitles: no special
+	// tokens, no hallucination loops, and Chinese in one script.
+	segments = asr.CleanSegments(segments, asr.CleanupOptions{
+		Language: lang,
+		Simplify: r.cfg.ASRSimplify,
+	})
 	if len(segments) == 0 {
 		return errors.New("没有识别到语音内容")
 	}

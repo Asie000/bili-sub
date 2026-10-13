@@ -201,6 +201,8 @@ IR 始终保留时间轴；**渲染 txt/json/md 时丢弃时间轴**，渲染 sr
 - Python **常驻 worker**：模型只加载一次；Go 与 worker 通过 **stdin/stdout JSON-lines** 通信（`{"audio":"...","lang":"zh|en","model":"small"}` → `{"segments":[...],"error":""}`）。
 - **转写语言（已定）**：本地 ASR **只支持中文、英文**两种；命令行 `--lang`（默认 zh，传空则由模型自动检测）。
 - **模型选择**：优先级 `--model` > `.env` 的 `ASR_MODEL` > worker 默认（`small`）。默认不设 `ASR_MODEL`，免得新环境一上手就自动下载几个 GB 的模型。
+- **输出后处理**：在 Go 侧、在 `asr.Backend` 之外做，所以每个后端都得到同一份可读字幕：去特殊标记、去乱码/空段、去汉字间多余空格、合并连续重复段（Whisper 的幻觉循环）、繁转简。繁简表由 `zhconv` 生成（`internal/asr/trad2simp.go`，4056 字，字级，上下文相关字取最常用简体形）。繁转简可用 `ASR_SIMPLIFY=0` 关掉（台湾等本来就是繁体的内容）。
+  - 实测：同一段 268 秒音频，`tiny` 原始输出 175 种繁体字 → 清理后 0；`small` 原始就不带繁体。即繁体主要是小模型的问题。
 - 流程（**偏离原计划：去掉 ffmpeg**）：`playurl` 取 dash 音频 m4s → 下载到 `data/audio/` → **直接**喂 worker（PyAV 自带解码器）→ 得 IR 落盘 srt + transcripts → **立即删 m4s**。省掉一次转码和一次 wav 落盘（一小时 wav 约 115MB）。
 - **登录要求**：`playurl` 是登录接口，匿名调用返回 `-101 账号未登录`；错误信息会直接提示先 `bili-sub login`。注意只有 `-101` 算「登录态失效」并中止整条腿，`-400` 只是这条请求被拒，仍按逐视频失败处理。
 - 后端接口 `asr.Backend`：`Start() error` / `Transcribe(ctx, audioPath, opts) ([]Segment, error)` / `Name() string` / `Close() error`；默认 `faster-whisper`，`sensevoice` 预留。
