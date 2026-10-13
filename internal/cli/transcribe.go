@@ -13,7 +13,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"bilibili-sub/internal/asr"
-	"bilibili-sub/internal/bili"
 	"bilibili-sub/internal/export"
 	"bilibili-sub/internal/ir"
 	"bilibili-sub/internal/pipeline"
@@ -191,20 +190,22 @@ func (r *runtime) transcribe(ctx context.Context, out io.Writer, lang, model, so
 			// every remaining row would fail identically, so stop and leave their
 			// state alone (spec §八: 判定 Cookie 失效，暂停并告警). A -400 is
 			// bilibili rejecting this one request, so it stays per-video.
-			var apiErr *bili.APIError
-			if errors.As(err, &apiErr) && apiErr.SessionExpired() {
+			if sessionExpired(err) {
 				fmt.Fprintf(out, "登录态失效，已停止转写（%v）。请先运行 `bili-sub login`；剩余 %d 个视频保持原状态。\n",
 					err, len(videos)-i-1)
 				return stats, err
 			}
+			// A cancelled run is not a per-video failure: the in-flight video
+			// returns context.Canceled, and counting it would report a failure that
+			// never happened (downloadSubtitles and probe guard the same way).
+			if ctx.Err() != nil {
+				fmt.Fprintf(out, "已取消：完成 %d/%d，其余视频保持原状态。\n", stats.OK, stats.Total)
+				return stats, ctx.Err()
+			}
 			stats.Failed++
 			fmt.Fprintf(out, "第 %d 项 %s 转写失败：%v\n", i+1, v.Bvid, err)
-			// A cancelled run is not a per-video failure, so the row keeps its
-			// state -- downloadSubtitles and probe guard the same way.
-			if ctx.Err() == nil {
-				if serr := st.SetState(v.ID, store.StateFailed, v.Lang); serr != nil {
-					return stats, errors.Join(err, fmt.Errorf("标记 failed: %w", serr))
-				}
+			if serr := st.SetState(v.ID, store.StateFailed, v.Lang); serr != nil {
+				return stats, errors.Join(err, fmt.Errorf("标记 failed: %w", serr))
 			}
 		} else {
 			stats.OK++

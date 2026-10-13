@@ -111,7 +111,19 @@ func (r *runtime) run(ctx context.Context, out io.Writer, rawURL, kindSpec, lang
 		return err
 	}
 
-	_, asrErr := r.download(ctx, out, lang, formats, transcribe, asrLang, model, source, legProgressSink(onProgress))
+	// The two legs are driven separately here so a failure is attributed to the
+	// stage that actually produced it: r.download returns one error covering
+	// both the subtitle fetch and the ASR leg, which made a download-leg failure
+	// look like a transcribe-leg failure.
+	sink := legProgressSink(onProgress)
+	source = pipeline.NormalizeSourceKey(source)
+	if _, err := r.downloadSubtitles(ctx, out, lang, formats, source, tagLeg(sink, opDownload)); err != nil {
+		return err
+	}
+	var asrErr error
+	if transcribe {
+		_, asrErr = r.transcribe(ctx, out, asrLang, model, source, tagLeg(sink, opTranscribe))
+	}
 
 	if _, err := r.export(ctx, out, out, formats, false, onProgress); err != nil {
 		return err

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"bilibili-sub/internal/bili"
 )
@@ -428,6 +429,39 @@ func TestEnumerateFav(t *testing.T) {
 	defer mu.Unlock()
 	if !reflect.DeepEqual(pages, []string{"1", "2"}) {
 		t.Fatalf("fav pages=%v want [1 2]", pages)
+	}
+}
+
+// TestEnumerateFavStopsWhenAPageAddsNothing pins that has_more alone cannot
+// keep the loop going: a server that answers an out-of-range page with an empty
+// medias list and has_more=true would otherwise page forever.
+func TestEnumerateFavStopsWhenAPageAddsNothing(t *testing.T) {
+	viewSrv := httptest.NewServer(http.HandlerFunc(viewHandler))
+	defer viewSrv.Close()
+
+	var requests atomic.Int32
+	favSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		// Always claims more pages but never returns a video.
+		w.Write([]byte(`{"code":0,"message":"0","data":{"medias":[],"has_more":true}}`))
+	}))
+	defer favSrv.Close()
+
+	e := NewEnumerator(bili.NewClient("", nopLimiter{}))
+	e.ViewBaseURL = viewSrv.URL
+	e.FavBaseURL = favSrv.URL
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	videos, err := e.EnumerateFav(ctx, "999")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(videos) != 0 {
+		t.Fatalf("videos=%d want 0", len(videos))
+	}
+	if n := requests.Load(); n != 1 {
+		t.Fatalf("fav page requests=%d want 1 (stop once a page adds nothing)", n)
 	}
 }
 

@@ -270,7 +270,7 @@ func TestEndToEndPipelineNoNetwork(t *testing.T) {
 		docs[key] = &doc
 	}
 	formats := []string{export.FormatSRT, export.FormatText}
-	zipPath, err := export.Pack(filepath.Join(workDir, "exports"), time.Now(), docs, formats)
+	zipPath, err := export.Pack(filepath.Join(workDir, "exports"), time.Now(), docs, nil, formats)
 	if err != nil {
 		t.Fatalf("export.Pack: %v", err)
 	}

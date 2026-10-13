@@ -83,6 +83,11 @@ type downloadStats struct {
 	Failed           int
 	Transcribed      int
 	TranscribeFailed int
+	// FirstError is the first per-video download failure reason. serve passes
+	// io.Discard for the CLI writer, so without carrying it on the summary the
+	// browser would see a failure count with no explanation (the 412 self-help
+	// message in particular never reached the page).
+	FirstError string
 }
 
 // download runs the two halves of `download`: the subtitle fetch first, because
@@ -175,11 +180,22 @@ func (r *runtime) downloadSubtitles(ctx context.Context, out io.Writer, lang str
 	dir := r.subtitleDir()
 	dl := newDownloader(client, st, en, dir)
 
-	results := pipeline.Run(ctx, videos, r.cfg.Concurrency, func(ctx context.Context, v store.Video) (*ir.Document, error) {
+	// runCtx is cancelled when the first worker sees an expired session, so the
+	// other in-flight requests stop instead of each burning a request.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	abort := newLegAbort(cancel)
+
+	results := pipeline.Run(runCtx, videos, r.cfg.Concurrency, func(ctx context.Context, v store.Video) (*ir.Document, error) {
 		doc, err := dl.FetchSubtitle(ctx, v, lang)
 		tick(int(atomic.AddInt64(&doneCount, 1)))
 		if err == nil {
 			return doc, nil
+		}
+		// An expired session is about the login, not this video: stop the whole
+		// run and leave every row's state alone (spec §八).
+		if abort.hit(err) {
+			return nil, err
 		}
 		// Keep the run going; a failed download is retryable after `retry`.
 		if ctx.Err() == nil {
@@ -194,14 +210,17 @@ func (r *runtime) downloadSubtitles(ctx context.Context, out io.Writer, lang str
 	for i, res := range results {
 		v := videos[i]
 		if res.Err != nil || res.Value == nil {
-			// A cancelled run leaves every item it never reached with ctx.Err().
-			// Reporting those as failures would print a hundred lines about a
-			// hundred videos that were never tried.
-			if errors.Is(res.Err, context.Canceled) {
+			// A cancelled run leaves every item it never reached with ctx.Err(),
+			// and the -101 that stopped the run is reported once below. Neither is
+			// a failure of this video.
+			if errors.Is(res.Err, context.Canceled) || sessionExpired(res.Err) {
 				continue
 			}
 			failCount++
 			if res.Err != nil {
+				if stats.FirstError == "" {
+					stats.FirstError = res.Err.Error()
+				}
 				fmt.Fprintf(out, "第 %d 项 %s 失败：%v\n", i+1, v.Bvid, res.Err)
 			}
 			continue
@@ -214,6 +233,12 @@ func (r *runtime) downloadSubtitles(ctx context.Context, out io.Writer, lang str
 	}
 	stats.Fetched = okCount
 	stats.Failed = failCount
+	if aerr := abort.aborted(); aerr != nil {
+		msg := "登录态失效，已停止下载（" + aerr.Error() + "）。请先运行 `bili-sub login`；剩余视频保持原状态。"
+		fmt.Fprintln(out, msg)
+		stats.FirstError = msg
+		return stats, aerr
+	}
 	if err := ctx.Err(); err != nil {
 		// Reporting "下载完成：共 100，成功 2，失败 98" for a run the user stopped
 		// describes failures that did not happen, and the final tick would push

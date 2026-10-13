@@ -20,9 +20,16 @@ import (
 // folder): each file name is prefixed with the video's UP主 so one archive
 // still says whose video every subtitle belongs to.
 //
+// stems maps a docs key to the exact filename stem to use for it. The caller
+// passes the same stem the download leg wrote to disk (pageStem), which is how
+// two pages of one multi-P video stay distinct: the caller's stem carries the
+// _P{n} suffix after the bvid tag, where SanitizeSubtitleName's 100-rune
+// truncation cannot eat it. A missing/empty stem falls back to deriving it from
+// the document, keeping Pack usable on its own.
+//
 // A failed export leaves nothing behind: the partially written archive is
 // closed and removed before the error is returned.
-func Pack(outDir string, now time.Time, docs map[string]*ir.Document, formats []string) (zipPath string, err error) {
+func Pack(outDir string, now time.Time, docs map[string]*ir.Document, stems map[string]string, formats []string) (zipPath string, err error) {
 	base := now.Format("20060102") + "-" + strconv.Itoa(len(docs)*len(formats))
 	zipPath = filepath.Join(outDir, base+".zip")
 
@@ -52,7 +59,10 @@ func Pack(outDir string, now time.Time, docs map[string]*ir.Document, formats []
 		if d == nil {
 			return "", fmt.Errorf("document %q: nil document", key)
 		}
-		stem := filename.SanitizeSubtitleName(d.Author, d.Title, d.Bvid)
+		stem := stems[key]
+		if stem == "" {
+			stem = filename.SanitizeSubtitleName(d.Author, d.Title, d.Bvid)
+		}
 		for _, format := range formats {
 			entry := base + "/" + stem + "." + format
 			if _, dup := written[entry]; dup {

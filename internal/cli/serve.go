@@ -140,9 +140,9 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 				}
 			}
 			stats, err := r.probe(ctx, io.Discard, rawURL, kind, force, pipeline.DefaultSearchLimit, progress)
-			if err != nil {
-				return server.ProbeSummary{}, err
-			}
+			// The counts and the first failure reason go back even when the run
+			// failed part-way; the handler decides whether that is a partial
+			// success or a real failure.
 			return server.ProbeSummary{
 				Probed:         stats.Total,
 				Downloadable:   stats.Downloadable,
@@ -151,7 +151,8 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 				Failed:         stats.Failed,
 				Skipped:        stats.Skipped,
 				Hint:           stats.Hint,
-			}, nil
+				Reason:         stats.FirstError,
+			}, err
 		},
 		Download: func(ctx context.Context, lang string, transcribe bool, asrLang, model, source string, onProgress func(server.Progress)) (server.DownloadSummary, error) {
 			if !r.opMu.TryLock() {
@@ -176,6 +177,7 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 				Failed:           stats.Failed,
 				Transcribed:      stats.Transcribed,
 				TranscribeFailed: stats.TranscribeFailed,
+				Error:            stats.FirstError,
 			}, err
 		},
 		Export: func(ctx context.Context, formats []string, includeExported bool, onProgress func(server.Progress)) (string, error) {

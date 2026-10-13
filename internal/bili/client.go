@@ -76,11 +76,13 @@ type Client struct {
 	// point it at a local server.
 	FingerprintURL string
 
-	// mu guards the lazily fetched device cookies below.
-	mu         sync.Mutex
-	buvidTried bool
-	buvid3     string
-	buvid4     string
+	// mu guards the lazily fetched device cookies below. buvidOnce makes every
+	// concurrent caller wait for the first fingerprint fetch to finish instead of
+	// racing past a "tried" flag and sending its own request bare.
+	mu        sync.Mutex
+	buvidOnce sync.Once
+	buvid3    string
+	buvid4    string
 }
 
 // retryBackoffs are the waits before each 412 retry. B站's 412 is usually a
@@ -223,21 +225,20 @@ func (c *Client) ensureBuvid(ctx context.Context) {
 	if c.Cookie != "" {
 		return
 	}
-	c.mu.Lock()
-	if c.buvidTried {
+	// sync.Once, not a bool flag: the concurrent workers of a run all reach here
+	// at once, and with a flag every one but the first returned while buvid3/4
+	// were still empty and sent its request without a fingerprint -- exactly the
+	// bare request the wbi endpoints answer with a 412. Once makes them wait for
+	// the one fetch instead.
+	c.buvidOnce.Do(func() {
+		b3, b4, err := c.fetchBuvid(ctx)
+		if err != nil || b3 == "" {
+			return
+		}
+		c.mu.Lock()
+		c.buvid3, c.buvid4 = b3, b4
 		c.mu.Unlock()
-		return
-	}
-	c.buvidTried = true
-	c.mu.Unlock()
-
-	b3, b4, err := c.fetchBuvid(ctx)
-	if err != nil || b3 == "" {
-		return
-	}
-	c.mu.Lock()
-	c.buvid3, c.buvid4 = b3, b4
-	c.mu.Unlock()
+	})
 }
 
 func (c *Client) fingerprintURL() string {

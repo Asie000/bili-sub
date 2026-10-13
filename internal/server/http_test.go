@@ -256,6 +256,34 @@ func TestProbeEndpointReturnsTheHint(t *testing.T) {
 	}
 }
 
+// TestProbeEndpointReturnsPartialReason pins that a seam which did work and then
+// stopped (an expired session, a rate limit) comes back as 200 with the counts
+// and the reason, not a 500 that throws both away -- the page has no terminal to
+// read the CLI's own output.
+func TestProbeEndpointReturnsPartialReason(t *testing.T) {
+	const reason = "登录态失效，已停止探测。请先运行 `bili-sub login`。"
+	s := newTestServer(t, Options{
+		Probe: func(_ context.Context, _, _ string, _ bool, _ func(Progress)) (ProbeSummary, error) {
+			return ProbeSummary{Probed: 3, Reason: reason}, errors.New("bilibili code=-101 message=账号未登录")
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/probe", `{"url":"BV1u84y1i7u6"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var got ProbeSummary
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if got.Reason != reason {
+		t.Errorf("reason = %q, want %q", got.Reason, reason)
+	}
+	if got.Probed != 3 {
+		t.Errorf("probed = %d, want the counts kept", got.Probed)
+	}
+}
+
 func TestProbeEndpointRejectsEmptyURL(t *testing.T) {
 	s := newTestServer(t, Options{
 		Probe: func(_ context.Context, _, _ string, _ bool, _ func(Progress)) (ProbeSummary, error) {
@@ -532,6 +560,30 @@ func TestDownloadPartialSuccessKeepsTheCounts(t *testing.T) {
 	}
 	if !strings.Contains(got.Error, "登录") {
 		t.Errorf("error field = %q, want the failure reason", got.Error)
+	}
+}
+
+// TestDownloadEndpointSurfacesFirstErrorWithoutAnError pins the all-videos-failed
+// case: downloadSubtitles returns nil (a per-video failure is not a leg-level
+// error), so the only way the reason reaches the page is the summary's Error.
+func TestDownloadEndpointSurfacesFirstErrorWithoutAnError(t *testing.T) {
+	const reason = "HTTP 412（B站风控限流）：请求过于频繁被临时拦截"
+	s := newTestServer(t, Options{
+		Download: func(_ context.Context, _ string, _ bool, _, _, _ string, _ func(Progress)) (DownloadSummary, error) {
+			return DownloadSummary{Failed: 2, Error: reason}, nil
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/download", `{}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var got DownloadSummary
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Error != reason {
+		t.Errorf("error = %q, want %q", got.Error, reason)
 	}
 }
 

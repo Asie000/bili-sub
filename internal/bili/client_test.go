@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -186,6 +188,55 @@ func TestFullCookieIsSentVerbatimWithoutFingerprint(t *testing.T) {
 	}
 	if fingerprintHits != 0 {
 		t.Fatalf("fingerprint endpoint called %d times, want 0 with a full cookie", fingerprintHits)
+	}
+}
+
+// TestEnsureBuvidIsFetchedOnceForConcurrentCallers pins that concurrent workers
+// all wait for the single fingerprint fetch instead of racing past a flag: with
+// a flag, every worker but the first sent its request bare, which is exactly the
+// request the wbi endpoints answer with a 412.
+func TestEnsureBuvidIsFetchedOnceForConcurrentCallers(t *testing.T) {
+	var hits atomic.Int32
+	release := make(chan struct{})
+	fp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		<-release // hold the fetch open so early-returning callers are visible
+		fmt.Fprint(w, `{"code":0,"data":{"b_3":"B3VALUE","b_4":"B4VALUE"}}`)
+	}))
+	defer fp.Close()
+
+	c := NewClient("SESS", nopLimiter{})
+	c.FingerprintURL = fp.URL
+
+	const n = 8
+	var wg sync.WaitGroup
+	returned := make(chan struct{}, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.ensureBuvid(context.Background())
+			returned <- struct{}{}
+		}()
+	}
+	// One goroutine holds the fetch blocked on release; if the others did not wait
+	// they would have returned by now.
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-returned:
+		t.Fatal("a caller returned before the fingerprint fetch finished")
+	default:
+	}
+	close(release)
+	wg.Wait()
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("fingerprint hits = %d, want 1", got)
+	}
+	cookie := c.cookieHeader()
+	for _, want := range []string{"buvid3=B3VALUE", "buvid4=B4VALUE"} {
+		if !strings.Contains(cookie, want) {
+			t.Fatalf("cookie = %q, want %q", cookie, want)
+		}
 	}
 }
 

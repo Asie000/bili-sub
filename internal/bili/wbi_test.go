@@ -76,6 +76,32 @@ func TestSignAddsWTSWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestSignFiltersUnescapedSymbolsForHash(t *testing.T) {
+	s, err := NewWBISigner(
+		"7cd084941338484aae1ad9425b84077c",
+		"4932caff0ff746eab6f01bf08b70ac45",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Sign(map[string]string{"keyword": "it's!", "wts": "1700000000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stripped, err := s.Sign(map[string]string{"keyword": "its", "wts": "1700000000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The reference algorithm strips !'()* before hashing, so the two must sign
+	// the same string, while the original value is still sent unchanged.
+	if got["w_rid"] != stripped["w_rid"] {
+		t.Fatalf("w_rid = %s for %q, want same as stripped %s", got["w_rid"], "it's!", stripped["w_rid"])
+	}
+	if got["keyword"] != "it's!" {
+		t.Fatalf("keyword sent as %q, want the original unchanged", got["keyword"])
+	}
+}
+
 func TestNewWBISignerRejectsShortKey(t *testing.T) {
 	if _, err := NewWBISigner("tooshort", "alsoshort"); err == nil {
 		t.Fatal("expected error for keys shorter than 64 characters")

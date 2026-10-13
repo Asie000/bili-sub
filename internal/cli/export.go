@@ -102,6 +102,7 @@ func (r *runtime) export(ctx context.Context, out, warn io.Writer, formats []str
 	doneCount := 0
 
 	docs := make(map[string]*ir.Document, len(videos))
+	stems := make(map[string]string, len(videos))
 	keyIDs := make(map[string]int64, len(videos))
 	for _, v := range videos {
 		// Packing is local work, but a big archive still takes long enough that a
@@ -135,16 +136,16 @@ func (r *runtime) export(ctx context.Context, out, warn io.Writer, formats []str
 		if doc.Author == "" {
 			doc.Author = v.Author
 		}
-		// Multi-P videos share a bvid and title, so both the map key and the
-		// document title need the page suffix; otherwise Pack rejects the
-		// duplicate stems.
+		// Multi-P videos share a bvid and title. The map key keeps them apart,
+		// and the archive stem is passed in explicitly as pageStem(v): it puts
+		// _P{n} after the bvid tag, where SanitizeSubtitleName's truncation
+		// cannot drop it, and it matches the name the download leg wrote.
 		key := v.Bvid
 		if v.PageIndex > 1 {
-			suffix := "_P" + strconv.Itoa(v.PageIndex)
-			key += suffix
-			doc.Title += suffix
+			key += "_P" + strconv.Itoa(v.PageIndex)
 		}
 		docs[key] = &doc
+		stems[key] = pageStem(v)
 		keyIDs[key] = v.ID
 		doneCount++
 		tick(doneCount)
@@ -155,7 +156,7 @@ func (r *runtime) export(ctx context.Context, out, warn io.Writer, formats []str
 	}
 
 	outDir := filepath.Join(r.cfg.DataDir, "exports")
-	zipPath, err := export.Pack(outDir, time.Now(), docs, formats)
+	zipPath, err := export.Pack(outDir, time.Now(), docs, stems, formats)
 	if err != nil {
 		return "", err
 	}

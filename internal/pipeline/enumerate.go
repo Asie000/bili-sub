@@ -154,6 +154,12 @@ func (e *Enumerator) EnumerateSpace(ctx context.Context, mid string) ([]*bili.Vi
 		if err != nil {
 			return nil, err
 		}
+		if len(infos) == 0 {
+			// A page whose entries all failed to resolve added nothing; count is a
+			// server claim, and asking for more pages could loop forever. Same
+			// guard as EnumerateSeason.
+			break
+		}
 		videos = append(videos, infos...)
 		if resp.Page.Count > 0 && len(videos) >= resp.Page.Count {
 			break
@@ -346,6 +352,11 @@ func (e *Enumerator) EnumerateFav(ctx context.Context, mediaID string) ([]*bili.
 		infos, err := e.resolveAll(ctx, bvids)
 		if err != nil {
 			return nil, err
+		}
+		if len(infos) == 0 {
+			// has_more is a server claim; a page of nothing but deleted videos would
+			// otherwise loop on it forever. Same guard as EnumerateSeason.
+			break
 		}
 		videos = append(videos, infos...)
 		if !resp.HasMore {

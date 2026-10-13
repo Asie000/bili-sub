@@ -19,7 +19,7 @@ func TestPack(t *testing.T) {
 		"BV1": {Bvid: "BV1", Title: "视频一", Author: "UP甲", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "a"}}},
 		"BV2": {Bvid: "BV2", Title: "视频二", Author: "UP乙", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "b"}}},
 	}
-	z, err := Pack(dir, now, docs, []string{"srt", "txt"})
+	z, err := Pack(dir, now, docs, nil, []string{"srt", "txt"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestPackRejectsDuplicateEntryName(t *testing.T) {
 		"first":  {Bvid: "BV1", Title: "同名", Author: "同一UP", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "a"}}},
 		"second": {Bvid: "BV1", Title: "同名", Author: "同一UP", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "b"}}},
 	}
-	z, err := Pack(dir, now, docs, []string{"srt"})
+	z, err := Pack(dir, now, docs, nil, []string{"srt"})
 	if err == nil {
 		t.Fatalf("Pack accepted duplicate entries, zip=%s", z)
 	}
@@ -97,7 +97,7 @@ func TestPackDifferentAuthorsNoCollision(t *testing.T) {
 		"first":  {Bvid: "BV1", Title: "同名", Author: "UP甲", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "a"}}},
 		"second": {Bvid: "BV1", Title: "同名", Author: "UP乙", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "b"}}},
 	}
-	z, err := Pack(dir, now, docs, []string{"srt"})
+	z, err := Pack(dir, now, docs, nil, []string{"srt"})
 	if err != nil {
 		t.Fatalf("Pack: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestPackRejectsNilDocument(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 10, 8, 0, 0, 0, 0, time.Local)
 	docs := map[string]*ir.Document{"broken": nil}
-	z, err := Pack(dir, now, docs, []string{"srt"})
+	z, err := Pack(dir, now, docs, nil, []string{"srt"})
 	if err == nil {
 		t.Fatalf("Pack accepted nil document, zip=%s", z)
 	}
@@ -155,7 +155,7 @@ func TestPackCreatesOutDir(t *testing.T) {
 	docs := map[string]*ir.Document{
 		"BV1": {Bvid: "BV1", Title: "视频一", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "a"}}},
 	}
-	z, err := Pack(dir, now, docs, []string{"srt"})
+	z, err := Pack(dir, now, docs, nil, []string{"srt"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestPackUnsupportedFormatLeavesNoArchive(t *testing.T) {
 	docs := map[string]*ir.Document{
 		"BV1": {Bvid: "BV1", Title: "视频一", Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "a"}}},
 	}
-	z, err := Pack(dir, now, docs, []string{"srt", "nope"})
+	z, err := Pack(dir, now, docs, nil, []string{"srt", "nope"})
 	if err == nil {
 		t.Fatalf("Pack accepted unsupported format, zip=%s", z)
 	}

@@ -113,6 +113,11 @@ type probeStats struct {
 	// probed video turned out to belong to. It is a value rather than a direct
 	// print so the CLI and the web summary show the same thing.
 	Hint string
+	// FirstError is the first per-video failure reason. serve passes io.Discard
+	// for the CLI writer, so a reason that only went to `out` would reach the
+	// command line but never the browser; carrying it on the summary lets the
+	// web page show why a run failed instead of a bare count.
+	FirstError string
 }
 
 // probeOutcome is what one worker learned about one video. err is carried in
@@ -151,6 +156,11 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 
 	infos, err := collectVideos(ctx, en, kind, key, limit)
 	if err != nil {
+		if sessionExpired(err) {
+			msg := "登录态失效（" + err.Error() + "）。请先运行 `bili-sub login`。"
+			fmt.Fprintln(out, msg)
+			stats.FirstError = msg
+		}
 		return stats, err
 	}
 	if kind == pipeline.KindSingle {
@@ -214,7 +224,13 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 	tick := newProgressEmitter(stats.Total, onProgress)
 
 	prober := newProber(client, st, en)
-	outcomes := pipeline.Run(ctx, videos, r.cfg.Concurrency, func(ctx context.Context, v store.Video) (probeOutcome, error) {
+	// runCtx is cancelled when the first worker sees an expired session, so the
+	// other in-flight requests stop instead of each burning a request and marking
+	// its own row failed.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	abort := newLegAbort(cancel)
+	outcomes := pipeline.Run(runCtx, videos, r.cfg.Concurrency, func(ctx context.Context, v store.Video) (probeOutcome, error) {
 		if _, skip := completed[v.ID]; skip {
 			tick(int(atomic.AddInt64(&doneCount, 1)))
 			return probeOutcome{skipped: true}, nil
@@ -223,6 +239,11 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 		tick(int(atomic.AddInt64(&doneCount, 1)))
 		if err == nil {
 			return probeOutcome{result: res}, nil
+		}
+		// An expired session is about the login, not this video: stop the whole
+		// run and leave every row's state alone (spec §八).
+		if abort.hit(err) {
+			return probeOutcome{err: err}, nil
 		}
 		// A failing video must not abort the rest of the run. A cancelled run
 		// is not a per-video failure, so it is left for `retry` to redo.
@@ -252,8 +273,9 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 		default:
 			// Either ProbeVideo failed, or the run was cancelled before this video
 			// was picked up. A cancelled run must not report the videos it never
-			// reached as failures.
-			if ctx.Err() != nil {
+			// reached as failures. runCtx is used (not ctx) so an expired-session
+			// abort also lands here rather than counting as a failed video.
+			if runCtx.Err() != nil {
 				return "已取消"
 			}
 			stats.Failed++
@@ -273,13 +295,29 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 	if err := writeVideosTable(out, videos, stateFor, langFor); err != nil {
 		return stats, err
 	}
-	fmt.Fprintf(out, "探测完成：共 %d，可下载 %d，无字幕 %d，充电锁定 %d，失败 %d，已完成 %d\n",
-		stats.Total, stats.Downloadable, stats.NoSubtitle, stats.ChargingLocked, stats.Failed, stats.Skipped)
-	// The table shows only a 失败 marker, so print why each probe failed.
+	summary := "探测完成"
+	if abort.aborted() != nil {
+		summary = "探测中止"
+	}
+	fmt.Fprintf(out, "%s：共 %d，可下载 %d，无字幕 %d，充电锁定 %d，失败 %d，已完成 %d\n",
+		summary, stats.Total, stats.Downloadable, stats.NoSubtitle, stats.ChargingLocked, stats.Failed, stats.Skipped)
+	// The table shows only a 失败 marker, so print why each probe failed. Items
+	// cancelled by the abort are not failures, and the -101 that triggered it is
+	// reported once below rather than per row.
 	for i, o := range outcomes {
-		if o.Value.err != nil {
-			fmt.Fprintf(out, "第 %d 项 %s 失败：%v\n", i+1, videos[i].Bvid, o.Value.err)
+		if o.Value.err == nil || errors.Is(o.Value.err, context.Canceled) || sessionExpired(o.Value.err) {
+			continue
 		}
+		if stats.FirstError == "" {
+			stats.FirstError = o.Value.err.Error()
+		}
+		fmt.Fprintf(out, "第 %d 项 %s 失败：%v\n", i+1, videos[i].Bvid, o.Value.err)
+	}
+	if aerr := abort.aborted(); aerr != nil {
+		msg := "登录态失效，已停止探测（" + aerr.Error() + "）。请先运行 `bili-sub login`；剩余视频保持原状态。"
+		fmt.Fprintln(out, msg)
+		stats.FirstError = msg
+		return stats, aerr
 	}
 	if ctx.Err() != nil {
 		return stats, ctx.Err()

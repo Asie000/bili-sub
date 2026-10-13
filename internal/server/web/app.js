@@ -6,11 +6,6 @@
 
 const $ = (id) => document.getElementById(id);
 
-// state.currentSource is the parsed source key of the source just probed. The
-// list is scoped to it unless "显示全部来源" is checked, so probing a second
-// source replaces the visible list instead of mixing it with the first.
-const state = { currentSource: "" };
-
 // PAGE_SIZE is the fixed page size the server accepts; pageOffset is the
 // offset of the page currently shown and pageTotal is the server-reported total
 // number of rows matching the active filter.
@@ -234,6 +229,12 @@ async function probe() {
     if (summary.hint) {
       log(summary.hint);
     }
+    // A whole-leg stop (an expired session) or a per-video failure reason. The
+    // server carries it on the summary because the CLI's own writer is discarded
+    // in serve mode, so the browser would otherwise see only the failure count.
+    if (summary.reason) {
+      log(`注意：${summary.reason}`);
+    }
     await loadVideos();
   } catch (err) {
     showFailure();
@@ -410,7 +411,6 @@ function applyLoginStatus(state) {
 function clearTable() {
   $("videos-body").textContent = "";
   $("stats").textContent = "";
-  state.currentSource = "";
   hideProgress();
   $("log").textContent = "";
   log("已清空列表与进度。");
@@ -427,7 +427,6 @@ async function clearData() {
     const result = await post("/api/reset", { confirm: true });
     log(`已清空数据：删除 ${result.deleted} 条记录。`);
     pageOffset = 0;
-    state.currentSource = "";
     await loadVideos();
   } catch (err) {
     log(`清空数据失败：${err.message}`);

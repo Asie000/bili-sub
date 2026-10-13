@@ -821,6 +821,167 @@ func TestExportPackagesOnlyNotYetExported(t *testing.T) {
 	}
 }
 
+// TestExportDisambiguatesLongMultiPartNames pins the collision that only shows
+// up for a multi-P video whose "author - title" is long enough to hit
+// SanitizeSubtitleName's 100-rune truncation: putting _P2 on the title made both
+// pages share one stem, so Pack rejected the archive and export failed forever
+// (the rows were never marked exported). The stem now carries _P{n} after the
+// bvid tag, exactly like the on-disk download name.
+func TestExportDisambiguatesLongMultiPartNames(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BILI_DATA_DIR", dir)
+
+	st, err := store.Open(filepath.Join(dir, "bili_sub.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	author := strings.Repeat("甲", 40)
+	title := strings.Repeat("题", 60)
+	const bvid = "BV1x411x7xx"
+	for page := 1; page <= 2; page++ {
+		id, err := st.UpsertVideo(&store.Video{Bvid: bvid, Cid: int64(1000 + page), Title: title, Author: author, State: store.StateFetched, PageIndex: page})
+		if err != nil {
+			t.Fatalf("upsert page %d: %v", page, err)
+		}
+		blob, err := json.Marshal(ir.Document{Bvid: bvid, Cid: int64(1000 + page), Title: title, Author: author, Lang: "zh-Hans",
+			Segments: []ir.Segment{{StartMs: 0, EndMs: 1000, Text: "你好"}}})
+		if err != nil {
+			t.Fatalf("marshal page %d: %v", page, err)
+		}
+		if err := st.SaveTranscript(id, "bilibili", "zh-Hans", string(blob)); err != nil {
+			t.Fatalf("save transcript page %d: %v", page, err)
+		}
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	if err := execute("export", "--format", "srt"); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	zips, err := filepath.Glob(filepath.Join(dir, "exports", "*.zip"))
+	if err != nil {
+		t.Fatalf("glob exports: %v", err)
+	}
+	if len(zips) != 1 {
+		t.Fatalf("exported zips = %v, want exactly one", zips)
+	}
+	zr, err := zip.OpenReader(zips[0])
+	if err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	defer zr.Close()
+	if len(zr.File) != 2 {
+		t.Fatalf("zip entries = %d, want 2 distinct multi-P names", len(zr.File))
+	}
+	base := strings.TrimSuffix(filepath.Base(zips[0]), ".zip") + "/"
+	stem := filename.SanitizeSubtitleName(author, title, bvid)
+	want := map[string]bool{base + stem + ".srt": true, base + stem + "_P2.srt": true}
+	for _, f := range zr.File {
+		if !want[f.Name] {
+			t.Errorf("unexpected zip entry %q; want %v", f.Name, want)
+		}
+	}
+}
+
+// TestProbeStopsWhenSessionExpired pins spec §八 for the probe leg: a -101 is a
+// whole-leg failure, so it must not mark the row failed and must tell the user
+// to log in. The unsigned view succeeds; the WBI-signed player call is where
+// the expired session surfaces.
+func TestProbeStopsWhenSessionExpired(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/x/web-interface/view":
+			_, _ = io.WriteString(w, `{"code":0,"message":"0","data":{"bvid":"BV1uv411q7Mv","aid":123,"cid":1001,"title":"视频","pubdate":1,"duration":10,"owner":{"mid":1,"name":"up"}}}`)
+		case "/x/web-interface/nav":
+			_, _ = io.WriteString(w, `{"code":-101,"message":"账号未登录"}`)
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	overrideEnumerator(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav")
+
+	rt := newTestRuntime(t)
+	defer rt.close()
+
+	var out strings.Builder
+	stats, err := rt.probe(context.Background(), &out, "BV1uv411q7Mv", "single", false, pipeline.DefaultSearchLimit, nil)
+	if !sessionExpired(err) {
+		t.Fatalf("err = %v, want the -101 session error", err)
+	}
+	if stats.Failed != 0 {
+		t.Fatalf("stats = %+v, want failed=0 (a -101 is not a per-video failure)", stats)
+	}
+	if stats.FirstError == "" {
+		t.Error("FirstError must carry the reason for the web summary")
+	}
+	if !strings.Contains(out.String(), "登录态失效") {
+		t.Errorf("output = %q, want the login hint", out.String())
+	}
+	st, err := rt.store()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	rows, err := st.ListVideosFiltered("", "BV1uv411q7Mv")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].State == store.StateFailed {
+		t.Fatalf("rows = %+v, want the row left not-failed", rows)
+	}
+}
+
+// TestDownloadStopsWhenSessionExpired is the download-leg counterpart of
+// TestProbeStopsWhenSessionExpired.
+func TestDownloadStopsWhenSessionExpired(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/x/web-interface/nav":
+			_, _ = io.WriteString(w, `{"code":-101,"message":"账号未登录"}`)
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	overrideEnumerator(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav")
+	overrideDownloader(t, srv.URL+"/x/player/v2")
+
+	rt := newTestRuntime(t)
+	defer rt.close()
+	st, err := rt.store()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if _, err := st.UpsertVideo(&store.Video{Bvid: "BV1aaaa1111a", Cid: 1, Aid: 123, Title: "源一", State: store.StateDownloadable, SourceKey: "111"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var out strings.Builder
+	stats, err := rt.download(context.Background(), &out, "", []string{"srt"}, false, defaultASRLang, "", "111", nil)
+	if !sessionExpired(err) {
+		t.Fatalf("err = %v, want the -101 session error", err)
+	}
+	if stats.Failed != 0 {
+		t.Fatalf("stats = %+v, want failed=0", stats)
+	}
+	if stats.FirstError == "" {
+		t.Error("FirstError must carry the reason for the web summary")
+	}
+	if !strings.Contains(out.String(), "登录态失效") {
+		t.Errorf("output = %q, want the login hint", out.String())
+	}
+	rows, err := st.ListVideosFiltered("", "111")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 || rows[0].State != store.StateDownloadable {
+		t.Fatalf("rows = %+v, want the row left downloadable", rows)
+	}
+}
+
 // TestProbeSeasonKeysRowsByTheCollection pins the trap this feature exists to
 // close: a 合集 URL starts with space.bilibili.com/<mid>/, so before this the
 // probe silently returned the UP主's entire backlog instead of the collection

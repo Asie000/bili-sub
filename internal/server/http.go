@@ -30,6 +30,11 @@ type ProbeSummary struct {
 	// browser has no terminal to read, so the CLI's hint has to travel with the
 	// summary or the page simply cannot mention it.
 	Hint string `json:"hint,omitempty"`
+	// Reason is why a probe failed: the first per-video failure, or the sentence
+	// explaining a whole-leg stop (an expired session). Like Hint it travels on
+	// the summary because serve passes io.Discard for the CLI writer, so a reason
+	// printed only there would never reach the browser.
+	Reason string `json:"reason,omitempty"`
 }
 
 // VideoPage is one page of GET /api/videos. Items is always a non-nil slice so
@@ -337,8 +342,17 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	summary, err := s.opts.Probe(r.Context(), req.URL, req.Kind, req.Force, onProgress)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+		// A run that did work and then stopped (an expired session, a rate limit)
+		// is a partial result rather than a 500: the counts and the reason are
+		// real, and dropping them would tell the page nothing happened when rows
+		// were in fact touched.
+		if summary.Probed == 0 && summary.Downloadable == 0 && summary.NoSubtitle == 0 && summary.ChargingLocked == 0 && summary.Failed == 0 && summary.Skipped == 0 {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if summary.Reason == "" {
+			summary.Reason = err.Error()
+		}
 	}
 	s.eventHub().Broadcast(Event{Type: "probe", Data: summary})
 	writeJSON(w, http.StatusOK, probeResponse{ProbeSummary: summary, Source: source, Kind: kind.String()})
@@ -381,7 +395,9 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		summary.Error = err.Error()
+		if summary.Error == "" {
+			summary.Error = err.Error()
+		}
 	}
 	s.eventHub().Broadcast(Event{Type: "download", Data: summary})
 	writeJSON(w, http.StatusOK, summary)
@@ -477,13 +493,10 @@ func (s *Server) handleSessdata(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleHandoff receives the browser extension's full Cookie plus the current
-// tab URL. A cookie logs in with its SESSDATA derived so both halves persist;
-// a failing Login is reported but does not stop the probe, which runs when a
-// URL is given. The cookie and SESSDATA values are never echoed or logged.
-// handleHandoff receives the browser extension's full Cookie plus the current
 // page URL. It only stores the login and hands the URL back to the page; the
 // user still chooses when to probe. A probe here would re-list every video the
-// local database already holds, which is not what the user asked for.
+// local database already holds, which is not what the user asked for. The
+// cookie and SESSDATA values are never echoed or logged.
 func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Cookie string `json:"cookie"`
@@ -597,15 +610,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 // small JSON object.
 const maxRequestBody = 1 << 20
 
-// decodeJSON decodes a JSON request body. An empty body leaves dst at its zero
+// decodeJSON reads a JSON body. Only application/json is accepted: this server
+// has no auth, and a page the user is visiting can still send a "simple"
+// cross-origin POST to loopback -- an empty body or text/plain -- without a
+// preflight, which would let it start a download run. Demanding the JSON content
+// type forces a preflight, and this server never answers one for a disallowed
+// origin, so a cross-origin page cannot reach a handler at all. The embedded
+// UI's fetch() already sets the header; a curl user has to add
+// -H 'Content-Type: application/json'. An empty body leaves dst at its zero
 // value so `POST /api/download` needs no body.
-// decodeJSON reads a JSON body. Only application/json is accepted: this server has
-// no auth, and a page the user is visiting can still send a "simple" cross-origin
-// POST to loopback -- an empty body or text/plain -- without a preflight, which
-// would let it start a download run. Demanding the JSON content type forces a
-// preflight, and this server never answers one, so a cross-origin page cannot
-// reach a handler at all. The embedded UI's fetch() already sets the header; a
-// curl user has to add -H 'Content-Type: application/json'.
 func decodeJSON(r *http.Request, dst any) error {
 	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		return fmt.Errorf("Content-Type 必须是 application/json（收到 %q）", ct)

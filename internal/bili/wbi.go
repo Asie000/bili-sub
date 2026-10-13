@@ -22,6 +22,14 @@ var mixinKeyEncTab = []int{
 
 const mixinKeyLen = 32
 
+// wbiValueFilter removes the characters JavaScript's encodeURIComponent leaves
+// unescaped but Go's url.QueryEscape escapes. B站's server strips them before
+// hashing -- the reference encWbi does value.replace(/[!'()*]/g, ”) -- so a
+// keyword containing one of them would otherwise sign a different string than
+// the server computes and be rejected. Only the hash uses the filtered value;
+// the original is still sent, and the server strips it the same way.
+var wbiValueFilter = strings.NewReplacer("!", "", "'", "", "(", "", ")", "", "*", "")
+
 type WBISigner struct {
 	mixinKey string
 }
@@ -63,7 +71,7 @@ func (s *WBISigner) Sign(params map[string]string) (map[string]string, error) {
 		}
 		q.WriteString(url.QueryEscape(k))
 		q.WriteByte('=')
-		q.WriteString(url.QueryEscape(out[k]))
+		q.WriteString(url.QueryEscape(wbiValueFilter.Replace(out[k])))
 	}
 	sum := md5.Sum([]byte(q.String() + s.mixinKey))
 	out["w_rid"] = hex.EncodeToString(sum[:])
