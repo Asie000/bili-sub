@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -123,6 +124,9 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 	infos, err := collectVideos(ctx, en, kind, key)
 	if err != nil {
 		return stats, err
+	}
+	if kind == pipeline.KindSingle {
+		printSeasonHint(out, infos)
 	}
 	st, err := r.store()
 	if err != nil {
@@ -259,8 +263,30 @@ func collectVideos(ctx context.Context, en *pipeline.Enumerator, kind pipeline.S
 		return en.EnumerateSpace(ctx, key)
 	case pipeline.KindFav:
 		return en.EnumerateFav(ctx, key)
+	case pipeline.KindSeason:
+		mid, seasonID, ok := pipeline.SplitSeasonKey(key)
+		if !ok {
+			return nil, fmt.Errorf("probe: 合集来源键格式不对：%q", key)
+		}
+		return en.EnumerateSeason(ctx, mid, seasonID)
 	default:
 		return nil, fmt.Errorf("probe: 不支持的来源类型 %s", kind)
+	}
+}
+
+// printSeasonHint answers the question a single-video link raises without acting
+// on it: this video is one episode of a 合集, and the whole collection is one
+// paste away. Expanding it automatically would turn a one-video request into
+// thirty videos and thirty times the requests, so the link is offered instead.
+func printSeasonHint(out io.Writer, infos []*bili.VideoInfo) {
+	for _, vi := range infos {
+		season := vi.UgcSeason
+		if season == nil || season.ID == 0 || season.Mid == 0 {
+			continue
+		}
+		fmt.Fprintf(out, "提示：这条视频属于合集《%s》，共 %d 条。要抓整个合集，用这个链接：\n  %s\n",
+			season.Title, season.VideoCount(),
+			pipeline.SeasonURL(strconv.FormatInt(season.Mid, 10), strconv.FormatInt(season.ID, 10)))
 	}
 }
 

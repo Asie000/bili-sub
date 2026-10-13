@@ -521,6 +521,20 @@ func overrideEnumerator(t *testing.T, viewURL, navURL string) {
 	t.Cleanup(func() { newEnumerator = prev })
 }
 
+// overrideSeasonEnumerator is overrideEnumerator plus the 合集 listing endpoint.
+func overrideSeasonEnumerator(t *testing.T, viewURL, navURL, seasonURL string) {
+	t.Helper()
+	prev := newEnumerator
+	newEnumerator = func(c *bili.Client) *pipeline.Enumerator {
+		en := pipeline.NewEnumerator(c)
+		en.ViewBaseURL = viewURL
+		en.NavURL = navURL
+		en.SeasonBaseURL = seasonURL
+		return en
+	}
+	t.Cleanup(func() { newEnumerator = prev })
+}
+
 // overrideProber points the prober's unsigned player endpoint at a fake server.
 func overrideProber(t *testing.T, playerV2URL string) {
 	t.Helper()
@@ -797,5 +811,142 @@ func TestExportPackagesOnlyNotYetExported(t *testing.T) {
 	defer zr2.Close()
 	if len(zr2.File) != 3 {
 		t.Fatalf("second zip entries = %d, want all 3 with --include-exported", len(zr2.File))
+	}
+}
+
+// TestProbeSeasonKeysRowsByTheCollection pins the trap this feature exists to
+// close: a 合集 URL starts with space.bilibili.com/<mid>/, so before this the
+// probe silently returned the UP主's entire backlog instead of the collection
+// the link points at. The rows must be keyed by the season, which is what
+// --source filtering and a later re-probe both read.
+func TestProbeSeasonKeysRowsByTheCollection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/x/polymer/web-space/seasons_archives_list":
+			q := r.URL.Query()
+			if q.Get("mid") != "453013730" || q.Get("season_id") != "9241496" {
+				t.Errorf("season request mid=%q sid=%q", q.Get("mid"), q.Get("season_id"))
+			}
+			if q.Get("page_num") != "1" || q.Get("page_size") != "30" {
+				t.Errorf("season paging = pn=%q ps=%q", q.Get("page_num"), q.Get("page_size"))
+			}
+			_, _ = io.WriteString(w, `{"code":0,"message":"0","data":{"archives":[{"bvid":"BV1uv411q7Mv"},{"bvid":"BV1uv411q7Mx"}],"page":{"page_num":1,"page_size":30,"total":2}}}`)
+		case "/x/web-interface/view":
+			bvid := r.URL.Query().Get("bvid")
+			fmt.Fprintf(w, `{"code":0,"message":"0","data":{"bvid":%q,"cid":1001,"title":"视频","pubdate":1,"duration":10,"owner":{"mid":453013730,"name":"up"},"pages":[{"cid":1001,"page":1,"part":"P1"}]}}`, bvid)
+		case "/x/player/v2":
+			_, _ = io.WriteString(w, `{"code":0,"message":"0","data":{"subtitle":{"subtitles":[]}}}`)
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	overrideSeasonEnumerator(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav",
+		srv.URL+"/x/polymer/web-space/seasons_archives_list")
+	overrideProber(t, srv.URL+"/x/player/v2")
+
+	rt := newTestRuntime(t)
+	defer rt.close()
+
+	const link = "https://space.bilibili.com/453013730/channel/collectiondetail?sid=9241496"
+	var out strings.Builder
+	stats, err := rt.probe(context.Background(), &out, link, "", false, nil)
+	if err != nil {
+		t.Fatalf("probe: %v\n%s", err, out.String())
+	}
+	if stats.Total != 2 {
+		t.Fatalf("stats = %+v, want the 合集's 2 videos rather than the UP主's whole space", stats)
+	}
+
+	st, err := rt.store()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	rows, err := st.ListVideosFiltered("", "season:453013730:9241496")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows keyed by the season = %d, want 2", len(rows))
+	}
+	spaceRows, err := st.ListVideosFiltered("", "453013730")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(spaceRows) != 0 {
+		t.Errorf("rows keyed by the bare mid = %d, want 0: this link is not the UP主's space", len(spaceRows))
+	}
+}
+
+// TestProbeSingleVideoPointsAtItsSeason pins the answer to "I pasted one video
+// and it is one episode of 31": the run still collects exactly that one video
+// (expanding would turn a 1-video request into 31 and 30x the requests), and the
+// output hands over the link that would collect the rest.
+func TestProbeSingleVideoPointsAtItsSeason(t *testing.T) {
+	const bvid = "BV1u84y1i7u6"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/x/web-interface/view":
+			fmt.Fprintf(w, `{"code":0,"message":"0","data":{"bvid":%q,"cid":1001,"title":"视频","pubdate":1,"duration":10,"owner":{"mid":406571547,"name":"up"},"pages":[{"cid":1001,"page":1,"part":"P1"}],"ugc_season":{"id":814546,"mid":406571547,"title":"100个办公神技","ep_count":31,"sections":[{"episodes":[{"bvid":%q}]}]}}}`, bvid, bvid)
+		case "/x/player/v2":
+			_, _ = io.WriteString(w, `{"code":0,"message":"0","data":{"subtitle":{"subtitles":[]}}}`)
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	overrideEnumerator(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav")
+	overrideProber(t, srv.URL+"/x/player/v2")
+
+	rt := newTestRuntime(t)
+	defer rt.close()
+
+	var out strings.Builder
+	stats, err := rt.probe(context.Background(), &out, bvid, "", false, nil)
+	if err != nil {
+		t.Fatalf("probe: %v\n%s", err, out.String())
+	}
+	if stats.Total != 1 {
+		t.Fatalf("stats = %+v, want the single video left alone", stats)
+	}
+	got := out.String()
+	for _, want := range []string{"100个办公神技", "共 31 条", "sid=814546"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
+// TestProbeSingleVideoWithoutASeasonStaysQuiet: most videos belong to no 合集, so
+// the hint must not appear for them -- a stray "属于合集《》" on every probe would
+// be noise.
+func TestProbeSingleVideoWithoutASeasonStaysQuiet(t *testing.T) {
+	const bvid = "BV1LJBcYYEZE"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/x/web-interface/view":
+			fmt.Fprintf(w, `{"code":0,"message":"0","data":{"bvid":%q,"cid":1001,"title":"视频","pubdate":1,"duration":10,"owner":{"mid":1,"name":"up"},"pages":[{"cid":1001,"page":1,"part":"P1"}]}}`, bvid)
+		case "/x/player/v2":
+			_, _ = io.WriteString(w, `{"code":0,"message":"0","data":{"subtitle":{"subtitles":[]}}}`)
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	overrideEnumerator(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav")
+	overrideProber(t, srv.URL+"/x/player/v2")
+
+	rt := newTestRuntime(t)
+	defer rt.close()
+
+	var out strings.Builder
+	if _, err := rt.probe(context.Background(), &out, bvid, "", false, nil); err != nil {
+		t.Fatalf("probe: %v\n%s", err, out.String())
+	}
+	if strings.Contains(out.String(), "合集") {
+		t.Errorf("output = %q, want no 合集 hint for a video in no 合集", out.String())
 	}
 }

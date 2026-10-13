@@ -14,24 +14,30 @@ import (
 )
 
 const (
-	defaultNavURL       = "https://api.bilibili.com/x/web-interface/nav"
-	defaultSpaceBaseURL = "https://api.bilibili.com/x/space/wbi/arc/search"
-	defaultFavBaseURL   = "https://api.bilibili.com/x/v3/fav/resource/list"
-	defaultViewBaseURL  = "https://api.bilibili.com/x/web-interface/view"
+	defaultNavURL        = "https://api.bilibili.com/x/web-interface/nav"
+	defaultSpaceBaseURL  = "https://api.bilibili.com/x/space/wbi/arc/search"
+	defaultFavBaseURL    = "https://api.bilibili.com/x/v3/fav/resource/list"
+	defaultViewBaseURL   = "https://api.bilibili.com/x/web-interface/view"
+	defaultSeasonBaseURL = "https://api.bilibili.com/x/polymer/web-space/seasons_archives_list"
 
 	spacePageSize = 30
 	favPageSize   = 20
+	// seasonPageSize is what seasons_archives_list accepts. Asking for more than
+	// 30 answers with a null data payload instead of clamping, so this is a real
+	// limit and not a tuning knob.
+	seasonPageSize = 30
 )
 
-// Enumerator turns a source (UP主 mid or 收藏夹 media_id) into the list of its
-// videos with pages/cids resolved. The BaseURL fields are exported so tests can
-// point them at httptest servers.
+// Enumerator turns a source (UP主 mid, 收藏夹 media_id or 合集 sid) into the list
+// of its videos with pages/cids resolved. The BaseURL fields are exported so
+// tests can point them at httptest servers.
 type Enumerator struct {
-	Client       *bili.Client
-	SpaceBaseURL string
-	FavBaseURL   string
-	ViewBaseURL  string
-	NavURL       string
+	Client        *bili.Client
+	SpaceBaseURL  string
+	FavBaseURL    string
+	ViewBaseURL   string
+	SeasonBaseURL string
+	NavURL        string
 
 	signer *bili.WBISigner
 	// mu guards signer: probes are dispatched concurrently, so the lazy build
@@ -41,11 +47,12 @@ type Enumerator struct {
 
 func NewEnumerator(c *bili.Client) *Enumerator {
 	return &Enumerator{
-		Client:       c,
-		SpaceBaseURL: defaultSpaceBaseURL,
-		FavBaseURL:   defaultFavBaseURL,
-		ViewBaseURL:  defaultViewBaseURL,
-		NavURL:       defaultNavURL,
+		Client:        c,
+		SpaceBaseURL:  defaultSpaceBaseURL,
+		FavBaseURL:    defaultFavBaseURL,
+		ViewBaseURL:   defaultViewBaseURL,
+		SeasonBaseURL: defaultSeasonBaseURL,
+		NavURL:        defaultNavURL,
 	}
 }
 
@@ -127,22 +134,82 @@ func (e *Enumerator) EnumerateSpace(ctx context.Context, mid string) ([]*bili.Vi
 		if len(resp.List.Vlist) == 0 {
 			break
 		}
+		bvids := make([]string, 0, len(resp.List.Vlist))
 		for _, v := range resp.List.Vlist {
-			if v.Bvid == "" {
+			bvids = append(bvids, v.Bvid)
+		}
+		infos, err := e.resolveAll(ctx, bvids)
+		if err != nil {
+			return nil, err
+		}
+		videos = append(videos, infos...)
+		if resp.Page.Count > 0 && len(videos) >= resp.Page.Count {
+			break
+		}
+	}
+	return videos, nil
+}
+
+// resolveAll turns listing bvids into full VideoInfos. Every listing that feeds
+// it -- 合集, UP主主页, 收藏夹 -- carries no cid, so this is where a source becomes
+// rows the rest of the pipeline can actually fetch. A video that is gone (-404)
+// is skipped rather than failing the whole listing; anything else is returned.
+func (e *Enumerator) resolveAll(ctx context.Context, bvids []string) ([]*bili.VideoInfo, error) {
+	infos := make([]*bili.VideoInfo, 0, len(bvids))
+	for _, bvid := range bvids {
+		if bvid == "" {
+			continue
+		}
+		info, err := e.ResolveVideo(ctx, bvid)
+		if err != nil {
+			var apiErr *bili.APIError
+			if errors.As(err, &apiErr) && apiErr.Code == -404 {
 				continue
 			}
-			info, err := e.ResolveVideo(ctx, v.Bvid)
-			if err != nil {
-				// One deleted/private video must not abort the whole listing.
-				var apiErr *bili.APIError
-				if errors.As(err, &apiErr) && apiErr.Code == -404 {
-					continue
-				}
-				return nil, err
-			}
-			videos = append(videos, info)
+			return nil, err
 		}
-		if resp.Page.Count > 0 && len(videos) >= resp.Page.Count {
+		infos = append(infos, info)
+	}
+	return infos, nil
+}
+
+// EnumerateSeason lists a 合集 (ps=30 per page) until the listing reports no
+// more. It takes both ids because the endpoint does: the mid says whose season
+// it is, the season_id which season.
+func (e *Enumerator) EnumerateSeason(ctx context.Context, mid, seasonID string) ([]*bili.VideoInfo, error) {
+	var videos []*bili.VideoInfo
+	for pn := 1; ; pn++ {
+		var resp struct {
+			Archives []struct {
+				Bvid string `json:"bvid"`
+			} `json:"archives"`
+			Page struct {
+				Total int `json:"total"`
+			} `json:"page"`
+		}
+		params := map[string]string{
+			"mid":          mid,
+			"season_id":    seasonID,
+			"sort_reverse": "false",
+			"page_num":     strconv.Itoa(pn),
+			"page_size":    strconv.Itoa(seasonPageSize),
+		}
+		if err := e.fetchListingPage(ctx, e.SeasonBaseURL, params, &resp); err != nil {
+			return nil, err
+		}
+		if len(resp.Archives) == 0 {
+			break
+		}
+		bvids := make([]string, 0, len(resp.Archives))
+		for _, a := range resp.Archives {
+			bvids = append(bvids, a.Bvid)
+		}
+		infos, err := e.resolveAll(ctx, bvids)
+		if err != nil {
+			return nil, err
+		}
+		videos = append(videos, infos...)
+		if resp.Page.Total > 0 && len(videos) >= resp.Page.Total {
 			break
 		}
 	}
@@ -168,21 +235,15 @@ func (e *Enumerator) EnumerateFav(ctx context.Context, mediaID string) ([]*bili.
 		if err := e.fetchListingPage(ctx, e.FavBaseURL, params, &resp); err != nil {
 			return nil, err
 		}
+		bvids := make([]string, 0, len(resp.Medias))
 		for _, m := range resp.Medias {
-			if m.Bvid == "" {
-				continue
-			}
-			info, err := e.ResolveVideo(ctx, m.Bvid)
-			if err != nil {
-				// One deleted/private video must not abort the whole listing.
-				var apiErr *bili.APIError
-				if errors.As(err, &apiErr) && apiErr.Code == -404 {
-					continue
-				}
-				return nil, err
-			}
-			videos = append(videos, info)
+			bvids = append(bvids, m.Bvid)
 		}
+		infos, err := e.resolveAll(ctx, bvids)
+		if err != nil {
+			return nil, err
+		}
+		videos = append(videos, infos...)
 		if !resp.HasMore {
 			break
 		}

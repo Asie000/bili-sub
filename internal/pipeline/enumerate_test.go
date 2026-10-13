@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -47,11 +48,81 @@ func TestParseURLError(t *testing.T) {
 	}
 }
 
+// TestParseURLSeasonBeatsSpace pins the trap this feature exists to avoid: a
+// 合集 URL starts with space.bilibili.com/<mid>/..., so testing the space
+// pattern first returns the UP主's whole backlog -- 54 videos instead of the 5
+// the link points at -- with no error and no warning anywhere.
+func TestParseURLSeasonBeatsSpace(t *testing.T) {
+	cases := []struct {
+		in  string
+		key string
+	}{
+		{"https://space.bilibili.com/453013730/channel/collectiondetail?sid=9241496", "season:453013730:9241496"},
+		{"https://space.bilibili.com/453013730/channel/collectiondetail?sid=9241496&ctype=21", "season:453013730:9241496"},
+		{"space.bilibili.com/453013730/lists/9241496?type=season", "season:453013730:9241496"},
+		{"https://space.bilibili.com/453013730/lists/9241496", "season:453013730:9241496"},
+	}
+	for _, c := range cases {
+		kind, key, err := ParseURL(c.in)
+		if err != nil {
+			t.Fatalf("%s: %v", c.in, err)
+		}
+		if kind != KindSeason || key != c.key {
+			t.Fatalf("%s: got (%v,%s) want (season,%s)", c.in, kind, key, c.key)
+		}
+	}
+}
+
+// TestSeasonURLRoundTrips pins that the link the CLI tells the user to paste is
+// one this parser accepts: a hint that produced an unparseable URL would send
+// them in a circle.
+func TestSeasonURLRoundTrips(t *testing.T) {
+	for _, c := range []struct{ mid, sid string }{
+		{"453013730", "9241496"},
+		{"406571547", "814546"},
+	} {
+		link := SeasonURL(c.mid, c.sid)
+		kind, key, err := ParseURL(link)
+		if err != nil {
+			t.Fatalf("%s: %v", link, err)
+		}
+		if kind != KindSeason || key != SeasonKey(c.mid, c.sid) {
+			t.Fatalf("%s: got (%v,%s) want (season,%s)", link, kind, key, SeasonKey(c.mid, c.sid))
+		}
+		mid, sid, ok := SplitSeasonKey(key)
+		if !ok || mid != c.mid || sid != c.sid {
+			t.Fatalf("SplitSeasonKey(%q) = (%q,%q,%v)", key, mid, sid, ok)
+		}
+	}
+}
+
+func TestSplitSeasonKeyRejectsNonSeasonKeys(t *testing.T) {
+	for _, key := range []string{"", "453013730", "BV1uv411q7Mv", "season:", "season:1", "season::2", "season:1:"} {
+		if mid, sid, ok := SplitSeasonKey(key); ok {
+			t.Errorf("SplitSeasonKey(%q) = (%q,%q,true), want ok=false", key, mid, sid)
+		}
+	}
+}
+
+// TestParseURLSeriesIsNamedNotSilentlyWrong: a 视频选集 is not a 合集 and has no
+// enumerator yet. Saying so is the whole point -- falling through to the space
+// pattern would download the UP主's entire backlog instead.
+func TestParseURLSeriesIsNamedNotSilentlyWrong(t *testing.T) {
+	_, _, err := ParseURL("https://space.bilibili.com/453013730/channel/seriesdetail?sid=123")
+	if err == nil {
+		t.Fatal("want an error naming the unsupported source")
+	}
+	if !strings.Contains(err.Error(), "选集") {
+		t.Fatalf("err = %v, want it to name 视频选集 as unsupported", err)
+	}
+}
+
 func TestSourceKindString(t *testing.T) {
 	cases := map[SourceKind]string{
 		KindSingle: "single",
 		KindSpace:  "space",
 		KindFav:    "fav",
+		KindSeason: "season",
 	}
 	for kind, want := range cases {
 		if got := kind.String(); got != want {
@@ -76,6 +147,8 @@ func TestParseURLForKind(t *testing.T) {
 		{"https://www.bilibili.com/medialist/detail/ml999", KindFav, "999"},
 		{"https://example.com/fav?fid=777", KindFav, "777"},
 		{"999", KindFav, "999"},
+		{"https://space.bilibili.com/453013730/channel/collectiondetail?sid=9241496", KindSeason, "season:453013730:9241496"},
+		{"https://space.bilibili.com/453013730/lists/9241496?type=season", KindSeason, "season:453013730:9241496"},
 	}
 	for _, c := range cases {
 		key, err := ParseURLForKind(c.in, c.kind)
@@ -97,6 +170,9 @@ func TestParseURLForKindError(t *testing.T) {
 		{"BV1uv411q7Mv", KindSpace},
 		{"https://example.com/foo", KindFav},
 		{"", KindSingle},
+		// 合集需要 mid 和 sid 两个号码，只给一个就用不了。
+		{"https://space.bilibili.com/453013730/channel/collectiondetail?sid=9241496", KindSingle},
+		{"https://www.bilibili.com/video/BV1uv411q7Mv", KindSeason},
 	}
 	for _, c := range cases {
 		if key, err := ParseURLForKind(c.in, c.kind); err == nil {
@@ -115,6 +191,8 @@ func TestParseSourceKind(t *testing.T) {
 		{"SPACE", KindSpace, true},
 		{"Fav", KindFav, true},
 		{" fav ", KindFav, true},
+		{"season", KindSeason, true},
+		{" Season ", KindSeason, true},
 		{"", 0, false},
 		{"video", 0, false},
 	}
@@ -139,6 +217,9 @@ func TestNewEnumeratorDefaults(t *testing.T) {
 	}
 	if e.ViewBaseURL != "https://api.bilibili.com/x/web-interface/view" {
 		t.Fatalf("ViewBaseURL=%s", e.ViewBaseURL)
+	}
+	if e.SeasonBaseURL != "https://api.bilibili.com/x/polymer/web-space/seasons_archives_list" {
+		t.Fatalf("SeasonBaseURL=%s", e.SeasonBaseURL)
 	}
 }
 
@@ -230,6 +311,72 @@ func TestEnumerateFav(t *testing.T) {
 	defer mu.Unlock()
 	if !reflect.DeepEqual(pages, []string{"1", "2"}) {
 		t.Fatalf("fav pages=%v want [1 2]", pages)
+	}
+}
+
+// TestEnumerateSeason pins the 合集 listing: it pages through
+// seasons_archives_list with both the mid and the season_id, then resolves every
+// bvid it finds. The second step is not optional -- the listing's archives[]
+// carry no cid, so ResolveVideo is what turns a 合集 into rows the rest of the
+// pipeline can actually fetch.
+func TestEnumerateSeason(t *testing.T) {
+	viewSrv := httptest.NewServer(http.HandlerFunc(viewHandler))
+	defer viewSrv.Close()
+
+	var mu sync.Mutex
+	var got []string
+	seasonSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		mu.Lock()
+		got = append(got, fmt.Sprintf("mid=%s sid=%s pn=%s ps=%s",
+			q.Get("mid"), q.Get("season_id"), q.Get("page_num"), q.Get("page_size")))
+		mu.Unlock()
+		switch q.Get("page_num") {
+		case "1":
+			w.Write([]byte(`{"code":0,"message":"0","data":{"archives":[
+				{"bvid":"BV1uv411q7Mv","title":"one"},
+				{"bvid":"BV1uv411q7Mx","title":"two"}],
+				"page":{"page_num":1,"page_size":2,"total":3}}}`))
+		case "2":
+			w.Write([]byte(`{"code":0,"message":"0","data":{"archives":[
+				{"bvid":"BV1uv411q7My","title":"three"}],
+				"page":{"page_num":2,"page_size":2,"total":3}}}`))
+		default:
+			t.Errorf("unexpected page_num %q", q.Get("page_num"))
+			w.Write([]byte(`{"code":0,"message":"0","data":{"archives":[]}}`))
+		}
+	}))
+	defer seasonSrv.Close()
+
+	e := NewEnumerator(bili.NewClient("", nopLimiter{}))
+	e.ViewBaseURL = viewSrv.URL
+	e.SeasonBaseURL = seasonSrv.URL
+
+	videos, err := e.EnumerateSeason(context.Background(), "453013730", "9241496")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(videos) != 3 {
+		t.Fatalf("videos=%d want 3", len(videos))
+	}
+	// Titles come from the view handler, which is how this proves every bvid went
+	// through ResolveVideo rather than being used straight from the listing.
+	want := []string{"title-BV1uv411q7Mv", "title-BV1uv411q7Mx", "title-BV1uv411q7My"}
+	for i, w := range want {
+		if videos[i].Title != w {
+			t.Errorf("videos[%d].Title = %q, want %q", i, videos[i].Title, w)
+		}
+		if videos[i].Cid != 100 {
+			t.Errorf("videos[%d].Cid = %d, want the cid the listing does not carry", i, videos[i].Cid)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("season requests = %v, want one per page", got)
+	}
+	if got[0] != "mid=453013730 sid=9241496 pn=1 ps=30" {
+		t.Errorf("first request = %q", got[0])
 	}
 }
 

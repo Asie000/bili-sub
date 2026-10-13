@@ -25,7 +25,7 @@
 | 版本 | 输入来源 | 其他 |
 |---|---|---|
 | **第一版（本次实现）** | 单视频、个人主页(UID)、收藏夹(FID) | login / probe / download / export / status / serve；ASR 接口预留 |
-| 第二版 | 合集(season)、视频选集 | |
+| 第二版 | 视频选集（series） | 合集(season) 已完成 |
 | 第三版 | 搜索页面 | WBI 分页 + 结果去重 |
 
 ---
@@ -295,5 +295,25 @@ IR 始终保留时间轴；**渲染 txt/json/md 时丢弃时间轴**，渲染 sr
 ## 十五、后续（非第一版）
 
 - ASR worker 的 Python 环境：见 §九 —— 原生 Windows Python 3.9–3.12（不走 WSL），venv 建在 `.asr-venv/`。**不要放 `data/` 下**：`reset --yes` 会整目录删除，连 Python 环境一起删。装依赖用 `pip install faster-whisper "av<19"`；模型首次运行自动下载到 HuggingFace 缓存。
-- 第二版：合集 + 视频选集；第三版：搜索页。
+- 第二版：合集（已完成）；第三版：视频选集 + 搜索页。
+
+### 合集（season）已实现（2026-10-13）
+
+两个入口：
+
+1. **直接粘合集链接**：`space.bilibili.com/<mid>/channel/collectiondetail?sid=<sid>`、
+   新的 `space.bilibili.com/<mid>/lists/<sid>?type=season`。来源键为 `season:<mid>:<sid>`；
+   枚举走 `x/polymer/web-space/seasons_archives_list`（ps=30 翻页），再逐条 `view` 拿 cid。
+2. **粘单视频链接**：若该视频属于某个合集，`view` 的 `ugc_season` 会给出合集名与条数，
+   探测时提示「这条视频属于合集《X》，共 N 条」并给出可粘贴的合集链接。
+   **不自动展开**：粘 1 条链接就下 31 条太意外，而且请求量差 30 倍；要整合集就粘那个链接。
+
+⚠️ 修复了一个静默错误：合集链接以前会被 `space\.bilibili\.com/(\d+)` 抢先命中，
+**不报错**地把 UP主全部视频当成了这个合集（劳动法猫头鹰 54 条 vs 合集 5 条）。
+现在合集判定在 space 之前，并且**视频选集（series）**链接会明确报「暂不支持」而不是猜。
+
+> 实测：`合集·劳动消息` 5 条、`合集·100个办公神技` 31 条（>30 真的翻到第 2 页），
+> `source_key` 均为 `season:<mid>:<sid>`；series 链接报错。
+> 注意：同一批视频若曾以 space 来源抓过，重新按合集抓会**把 source_key 改写成合集键**，
+> 按旧键过滤就找不到了。
 - 视频列表「字段设置」：第一版固定展示序号/标题/作者/发布日期/字幕状态/字幕语言/是否充电，后续再加可配置。
