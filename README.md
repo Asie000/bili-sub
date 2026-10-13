@@ -112,7 +112,7 @@ uv pip install --python .asr-venv/Scripts/python.exe faster-whisper "av<19"
 | **本地状态存储** | **SQLite** (`modernc.org/sqlite` 纯 Go 驱动) | 免 CGO 编译，单文件自包含，轻松支持数万条记录 |
 | **命令行交互** | `spf13/cobra` 或标准库 `flag` | 构建工业级 CLI 体验（`run`、`status`、`retry`） |
 | **音频抽取处理** | **不需要 ffmpeg**：faster-whisper 依赖的 PyAV 自带解码器，直接喂 `.m4s` | 省掉一次转码 + 一次落盘（一小时 wav 约 115MB）；`os/exec` 调 ffmpeg 的能力保留给 whisper.cpp / sherpa 后端 |
-| **本地 ASR 引擎** | **faster-whisper**（默认）或 **SenseVoice**（中文更优）或 **whisper.cpp**（CPU） | 借助成熟 C++/CUDA 内核，避免语言重复造轮子 |
+| **本地 ASR 引擎** | **faster-whisper**（默认，已实现）；**SenseVoice** / **whisper.cpp** 预留接口未实现 | 借助成熟 C++/CUDA 内核，避免语言重复造轮子 |
 | **前端看板（可选）** | **Vue 3 + Naive UI + Vite** | 作为后期阶段练习，通过 Go `net/http` 暴露 API / SSE 挂载 |
 
 ---
@@ -122,9 +122,9 @@ uv pip install --python .asr-venv/Scripts/python.exe faster-whisper "av<19"
 ### 阶段一：单文件突破——打通 B 站接口与 Go 基础语法
 > **目标**：用 1~2 个 `.go` 脚本，跑通单视频的字幕抓取，熟悉 Go 的基本编程习惯。
 
-- [ ] **Task 1.1**：用 `net/http` 请求 `https://api.bilibili.com/x/web-interface/view`，获取视频基本信息。
-- [ ] **Task 1.2**：实现 **WBI 签名模块**（调用 `/x/web-interface/nav` 拿 key，打乱编码表，计算 MD5 与 `w_rid` 参数）。
-- [ ] **Task 1.3**：调用 `x/player/wbi/v2` 拿 `subtitle_url`，解析并转换为本地 `.srt` 文件（处理时间戳格式 `HH:mm:ss,SSS`）。
+- [x] **Task 1.1**：用 `net/http` 请求 `https://api.bilibili.com/x/web-interface/view`，获取视频基本信息。
+- [x] **Task 1.2**：实现 **WBI 签名模块**（调用 `/x/web-interface/nav` 拿 key，打乱编码表，计算 MD5 与 `w_rid` 参数）。
+- [x] **Task 1.3**：调用 `x/player/wbi/v2` 拿 `subtitle_url`，解析并转换为本地 `.srt` 文件（处理时间戳格式 `HH:mm:ss,SSS`）。
 - **Go 核心学习点**：
   - 与 Java Bean 对比：结构体（`struct`）与 JSON Tag（`json:"title"`）。
   - 与 Java 异常对比：显式错误处理 `if err != nil`、`fmt.Errorf("%w", err)`。
@@ -135,10 +135,12 @@ uv pip install --python .asr-venv/Scripts/python.exe faster-whisper "av<19"
 ### 阶段二：工程化重构与持久化——支持批量枚举与断点续传
 > **目标**：规范 Go 项目目录结构，引入 SQLite 支持断点续传和全量自动翻页。
 
-- [ ] **Task 2.1**：建立工程目录（`cmd/`、`internal/bili`、`internal/store`、`internal/config`）。
-- [ ] **Task 2.2**：设计 SQLite 数据库表（`videos` 表、`subtitles` 表）。
-- [ ] **Task 2.3**：实现全量分页循环（空间 `ps=42`、收藏夹 `ps=36`，直到 `has_more=false`），批量写入数据库。
-- [ ] **Task 2.4**：实现幂等检查——重跑时自动跳过已经下载完的视频。
+- [x] **Task 2.1**：建立工程目录（`cmd/`、`internal/bili`、`internal/store`、`internal/config`）。
+- [x] **Task 2.2**：设计 SQLite 数据库表（`videos` 表、`transcripts` 表）。
+  - 计划里写的是 `subtitles` 表；实现改叫 `transcripts`，因为存的是 canonical IR（带时间轴的 JSON），不是纯文本字幕，导出时再从 IR 渲染。
+- [x] **Task 2.3**：实现全量分页循环，批量写入数据库。
+  - 实际分页大小：空间 `ps=30`、收藏夹 `ps=20`（计划里写的 42/36 是拍脑袋值）。合集 `page_size=30` 按 `page.total` 收尾，搜索 `page_size=20` 按“空页”收尾（`numPages` 只是声称）。
+- [x] **Task 2.4**：实现幂等检查——重跑时自动跳过已经下载完的视频。
 - **Go 核心学习点**：
   - `go.mod` 模块依赖管理、包（package）作用域与首字母大小写导出规则。
   - `database/sql` 接口、连接池配置、预编译语句与事务。
@@ -148,10 +150,13 @@ uv pip install --python .asr-venv/Scripts/python.exe faster-whisper "av<19"
 ### 阶段三：Go 的王牌——并发池、管道调度与风控限流
 > **目标**：上千级视频的高效抓取，同时保证稳健不封号。
 
-- [ ] **Task 3.1**：构建基于 **Channel** 的任务分发队列，启动固定数量（如 3~5 个）Worker Goroutine。
-- [ ] **Task 3.2**：集成 `golang.org/x/time/rate` 令牌桶限流器，限制总 QPS（如 2 req/s）并加入随机抖动（Jitter）。
-- [ ] **Task 3.3**：拦截 412/429 响应，实现退避休眠（Backoff）与 Cookie 失效报警。
-- [ ] **Task 3.4**：控制台输出友好的进度条与统计（成功/无字幕/失败数）。
+- [x] **Task 3.1**：构建基于 **Channel** 的任务分发队列，启动固定数量（如 3~5 个）Worker Goroutine。
+- [x] **Task 3.2**：集成 `golang.org/x/time/rate` 令牌桶限流器，限制总 QPS（默认 2 req/s）并加入随机抖动。
+  - 抖动是“额外多等 0~200ms”，不是“±200ms”：只会把请求拉开，不会让它变密。
+- [x] **Task 3.3**：拦截 412/429 响应，实现退避休眠（Backoff）与 Cookie 失效报警。
+  - 退避重试 3 次（2s/5s/12s）；`-101` 判定登录失效，整条腿停下来而不是把每个视频标失败。
+- [x] **Task 3.4**：控制台输出友好的统计（成功/无字幕/失败数）。
+  - 命令行是逐条一行 + 末尾汇总，进度条在网页端（SSE）。
 - **Go 核心学习点**：
   - `go func()` 协程启动、`chan` 阻塞与非阻塞通信。
   - `select` 多路复用、`context.Context` 优雅超时与退出控制。
@@ -176,8 +181,10 @@ uv pip install --python .asr-venv/Scripts/python.exe faster-whisper "av<19"
 > **目标**：为项目锦上添花，感受 Go 托管静态前端的便利。
 
 - [x] **Task 5.1**：用 Cobra 封装命令：`bili-sub run <url>`、`bili-sub status`、`bili-sub retry`。
-- [ ] **Task 5.2**：Go 标准库启动简易 HTTP 服务，暴露任务列表与统计接口。
-- [ ] **Task 5.3**：（可选）Vue 3 编写极简看板，由 Go 的 `embed.FS` 嵌入打包成单个独立 `.exe`。
+- [x] **Task 5.2**：Go 标准库启动简易 HTTP 服务，暴露任务列表与统计接口。
+  - `bili-sub serve`：登录 / 探测 / 下载 / 导出 / SSE 进度 / 任务列表，内嵌页面。
+- [x] **Task 5.3**：（可选）极简看板，由 Go 的 `embed.FS` 嵌入打包成单个独立 `.exe`。
+  - 实际用的是原生 HTML/CSS/JS，没上 Vue：页面只有一张表加几个控件，引入构建链收益不大。`embed.FS` 单文件打包已实现。
 
 ---
 

@@ -64,6 +64,44 @@ func TestGetAPIError(t *testing.T) {
 	}
 }
 
+// TestGetRetriesAfterTooManyRequests pins 429 to the same path as 412. B站's own
+// gate answers 412, but 429 is the generic "too many requests" it can return, and
+// the docs have promised 412/429 all along.
+func TestGetRetriesAfterTooManyRequests(t *testing.T) {
+	shrinkRetryBackoff(t)
+	fp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"code":0,"data":{"b_3":"B3VALUE","b_4":"B4VALUE"}}`)
+	}))
+	defer fp.Close()
+
+	var apiCalls int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiCalls++
+		if apiCalls == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		fmt.Fprint(w, `{"code":0,"message":"0","data":{"ok":true}}`)
+	}))
+	defer api.Close()
+
+	c := NewClient("SESS", nopLimiter{})
+	c.FingerprintURL = fp.URL
+
+	var out struct {
+		OK bool `json:"ok"`
+	}
+	if err := c.Get(context.Background(), api.URL, nil, &out); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !out.OK {
+		t.Fatal("payload was not decoded on the retry")
+	}
+	if apiCalls != 2 {
+		t.Errorf("apiCalls = %d, want 2 (one 429, then the retry)", apiCalls)
+	}
+}
+
 func TestGetRetriesWithBuvidAfter412(t *testing.T) {
 	shrinkRetryBackoff(t)
 	var fingerprintHits int

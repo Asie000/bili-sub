@@ -174,9 +174,9 @@ IR 始终保留时间轴；**渲染 txt/json/md 时丢弃时间轴**，渲染 sr
 
 ## 八、并发与风控
 
-- 全局 `rate.Limiter`：默认 2 req/s，叠加随机抖动 ±（配置可调）。
+- 全局 `rate.Limiter`：默认 2 req/s，每个请求额外等 0~200ms 随机抖动（只拉开间隔，不会变密）。
 - Worker 池：3~5 个 goroutine，`chan` 分发任务。
-- 412/429：指数退避 + 最大重试次数（默认 3），超限标 `failed`。
+- 412/429：指数退避 + 最大重试次数（默认 3）；超限后该请求报错，按「逐视频失败」处理，不中止整批。
 - API `code=-101`：判定 Cookie 失效，暂停并告警（CLI 提示 / Web 顶部横幅）。
 - `context.Context` 控制超时与 Ctrl+C 优雅退出：`cmd/bili-sub` 把 `os.Interrupt` 接到命令上下文上（第一次 Ctrl+C 取消，第二次恢复默认行为直接退出），所以 `probe`/`download`/`transcribe` 会在中途停下、不把在途视频标成 `failed`、临时音频也能删掉；`serve` 收到取消后 `Shutdown` 优雅关停。另加一层保险：`transcribe` 开始前会清掉 `data/audio/` 里的 `.m4s`——被 OS 硬杀（SIGKILL / 关终端 / 断电）的进程根本没机会跑 defer。
 - 请求统一带 `User-Agent` + `Referer: https://www.bilibili.com`。

@@ -34,6 +34,14 @@ type Limiter interface {
 	Wait(ctx context.Context) error
 }
 
+// isRiskControlStatus reports whether a status is bilibili's risk control
+// turning the request away. 412 is what it answers; 429 is the generic "too many
+// requests" the same gate can return, so both take the backoff path rather than
+// being reported as a hard failure.
+func isRiskControlStatus(code int) bool {
+	return code == http.StatusPreconditionFailed || code == http.StatusTooManyRequests
+}
+
 type APIError struct {
 	Code    int
 	Message string
@@ -108,7 +116,7 @@ func (c *Client) Get(ctx context.Context, rawURL string, params map[string]strin
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode == http.StatusPreconditionFailed {
+	if isRiskControlStatus(resp.StatusCode) {
 		// B站 answers 412 when its risk control rejects the request. It is
 		// usually a short-lived rate limit, so wait it out and retry a few
 		// times with the exact same cookies; a full browser Cookie clears it
@@ -123,14 +131,14 @@ func (c *Client) Get(ctx context.Context, rawURL string, params map[string]strin
 			if err != nil {
 				return err
 			}
-			if resp.StatusCode != http.StatusPreconditionFailed {
+			if !isRiskControlStatus(resp.StatusCode) {
 				break
 			}
 		}
-		if resp.StatusCode == http.StatusPreconditionFailed {
+		if isRiskControlStatus(resp.StatusCode) {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
-			return fmt.Errorf("HTTP 412（B站风控限流）：请求过于频繁被临时拦截，请等几分钟再试；若持续出现，可在页面登录框粘贴浏览器完整 Cookie")
+			return fmt.Errorf("HTTP %d（B站风控限流）：请求过于频繁被临时拦截，请等几分钟再试；若持续出现，可在页面登录框粘贴浏览器完整 Cookie", resp.StatusCode)
 		}
 	}
 	defer resp.Body.Close()
