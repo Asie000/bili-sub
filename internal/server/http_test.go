@@ -52,9 +52,41 @@ func serve(t *testing.T, s *Server, method, path, body string) *httptest.Respons
 	} else {
 		req = httptest.NewRequest(method, path, strings.NewReader(body))
 	}
+	// The server refuses bodies that are not JSON, on purpose; see decodeJSON.
+	if method != http.MethodGet {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
 	return rec
+}
+
+// TestMutatingEndpointsRequireJSON pins the CSRF guard. The server has no auth, and
+// a page the user visits can still POST to loopback with a "simple" request --
+// empty body, text/plain -- which browsers send without a preflight. Requiring the
+// JSON content type makes the browser ask permission first, and this server never
+// answers, so a cross-origin page cannot start a download run on the machine.
+func TestMutatingEndpointsRequireJSON(t *testing.T) {
+	called := false
+	s := newTestServer(t, Options{
+		Download: func(_ context.Context, _ string, _ bool, _, _, _ string, _ func(Progress)) (DownloadSummary, error) {
+			called = true
+			return DownloadSummary{Fetched: 1}, nil
+		},
+	})
+
+	// What a plain <form> or a no-cors fetch produces.
+	req := httptest.NewRequest(http.MethodPost, "/api/download", strings.NewReader(""))
+	req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("code = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Error("the download seam ran: a page the user visits could start a run")
+	}
 }
 
 func TestVideosEndpointEmptyStoreHasEmptyItems(t *testing.T) {

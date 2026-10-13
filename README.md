@@ -184,6 +184,7 @@ uv pip install --python .asr-venv/Scripts/python.exe faster-whisper "av<19"
 - [x] **Task 5.1**：用 Cobra 封装命令：`bili-sub run <url>`、`bili-sub status`、`bili-sub retry`。
 - [x] **Task 5.2**：Go 标准库启动简易 HTTP 服务，暴露任务列表与统计接口。
   - `bili-sub serve`：登录 / 探测 / 下载 / 导出 / SSE 进度 / 任务列表，内嵌页面。
+  - 默认只监听 **`127.0.0.1:8080`**：这个服务**没有任何鉴权**，所以才把“全网卡可达”留给用户显式选（`--addr :8080`，局域网/手机能访问）。写脚本调 API 时必须带 `-H 'Content-Type: application/json'`（服务只收 JSON 体，这是阻止“随便一个网页往本机 POST”的关）。
 - [x] **Task 5.3**：（可选）极简看板，由 Go 的 `embed.FS` 嵌入打包成单个独立 `.exe`。
   - 实际用的是原生 HTML/CSS/JS，没上 Vue：页面只有一张表加几个控件，引入构建链收益不大。`embed.FS` 单文件打包已实现。
 

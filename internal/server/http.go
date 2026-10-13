@@ -599,7 +599,17 @@ const maxRequestBody = 1 << 20
 
 // decodeJSON decodes a JSON request body. An empty body leaves dst at its zero
 // value so `POST /api/download` needs no body.
+// decodeJSON reads a JSON body. Only application/json is accepted: this server has
+// no auth, and a page the user is visiting can still send a "simple" cross-origin
+// POST to loopback -- an empty body or text/plain -- without a preflight, which
+// would let it start a download run. Demanding the JSON content type forces a
+// preflight, and this server never answers one, so a cross-origin page cannot
+// reach a handler at all. The embedded UI's fetch() already sets the header; a
+// curl user has to add -H 'Content-Type: application/json'.
 func decodeJSON(r *http.Request, dst any) error {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		return fmt.Errorf("Content-Type 必须是 application/json（收到 %q）", ct)
+	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody))
 	if err != nil {
 		return err

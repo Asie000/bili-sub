@@ -57,7 +57,7 @@ func newServeCmd() *cobra.Command {
 			return rt.serve(cmd.Context(), cmd.OutOrStdout(), addr)
 		},
 	}
-	cmd.Flags().String("addr", ":8080", "监听地址")
+	cmd.Flags().String("addr", "127.0.0.1:8080", "监听地址；默认只监听本机。填 :8080 则整个局域网都能访问，而服务没有任何鉴权")
 	return cmd
 }
 

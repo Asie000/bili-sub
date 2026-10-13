@@ -254,6 +254,20 @@ func TestQRLoginCancelsThePollWhenTheRequestGoesAway(t *testing.T) {
 	}
 }
 
+// TestServeDefaultsToLoopback: the server has no auth at all, so listening on
+// every interface has to be something the user asks for, not the default. Binding
+// 0.0.0.0 on a shared network hands anyone there the video list, the ability to
+// start runs, and POST /api/reset.
+func TestServeDefaultsToLoopback(t *testing.T) {
+	addr, err := newServeCmd().Flags().GetString("addr")
+	if err != nil {
+		t.Fatalf("flag: %v", err)
+	}
+	if addr != "127.0.0.1:8080" {
+		t.Errorf("--addr default = %q, want 127.0.0.1:8080", addr)
+	}
+}
+
 // TestServeStopsWhenTheProcessIsAskedToStop pins the graceful shutdown. main
 // now turns Ctrl+C into a context cancellation rather than a kill, so a server
 // that only listens would become impossible to stop with the very key its own
