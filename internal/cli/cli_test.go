@@ -542,18 +542,6 @@ func overrideSeasonEnumerator(t *testing.T, viewURL, navURL, seasonURL string) {
 	})
 }
 
-// overrideProber points the prober's unsigned player endpoint at a fake server.
-func overrideProber(t *testing.T, playerV2URL string) {
-	t.Helper()
-	prev := newProber
-	newProber = func(c *bili.Client, st *store.Store, en *pipeline.Enumerator) *pipeline.Prober {
-		p := pipeline.NewProber(c, st, en)
-		p.PlayerV2URL = playerV2URL
-		return p
-	}
-	t.Cleanup(func() { newProber = prev })
-}
-
 // overrideDownloader points the downloader's unsigned player endpoint at a fake
 // server.
 func overrideDownloader(t *testing.T, playerV2URL string) {
@@ -567,11 +555,12 @@ func overrideDownloader(t *testing.T, playerV2URL string) {
 	t.Cleanup(func() { newDownloader = prev })
 }
 
-// TestProbeSkipsCompletedVideos drives the real probe against a fake view server
-// with a seeded fetched row: the completed video must not be probed (no player
-// request), must be counted in stats.Skipped, and must keep its state. --force
-// then re-probes it.
-func TestProbeSkipsCompletedVideos(t *testing.T) {
+// TestProbeLeavesCompletedRowsAlone drives the real probe against a fake view
+// server with a seeded fetched row. Listing no longer checks subtitles (that
+// moved into download), so probe must make no player request at all, must leave
+// the completed row's state untouched, and --force must reset it to pending so
+// the next download re-checks it.
+func TestProbeLeavesCompletedRowsAlone(t *testing.T) {
 	const bvid = "BV1uv411q7Mv"
 	var playerRequests int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -580,7 +569,7 @@ func TestProbeSkipsCompletedVideos(t *testing.T) {
 			fmt.Fprintf(w, `{"code":0,"message":"0","data":{"bvid":%q,"cid":1001,"title":"视频","pubdate":1,"duration":10,"owner":{"mid":1,"name":"up"}}}`, bvid)
 		case "/x/player/v2":
 			atomic.AddInt32(&playerRequests, 1)
-			_, _ = io.WriteString(w, `{"code":0,"message":"0","data":{"subtitle":{"subtitles":[{"lan":"zh-CN","subtitle_url":"https://example.invalid/x.json"}]}}}`)
+			_, _ = io.WriteString(w, `{"code":0,"message":"0","data":{"subtitle":{"subtitles":[]}}}`)
 		default:
 			t.Errorf("unexpected request path %q", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -588,7 +577,6 @@ func TestProbeSkipsCompletedVideos(t *testing.T) {
 	}))
 	defer srv.Close()
 	overrideEnumerator(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav")
-	overrideProber(t, srv.URL+"/x/player/v2")
 
 	rt := newTestRuntime(t)
 	defer rt.close()
@@ -607,14 +595,11 @@ func TestProbeSkipsCompletedVideos(t *testing.T) {
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
-	if stats.Total != 1 || stats.Skipped != 1 {
-		t.Fatalf("stats = %+v, want total=1 skipped=1", stats)
+	if stats.Total != 1 {
+		t.Fatalf("stats = %+v, want total=1", stats)
 	}
 	if n := atomic.LoadInt32(&playerRequests); n != 0 {
-		t.Fatalf("a completed video was probed: %d player requests", n)
-	}
-	if !strings.Contains(out.String(), "已完成") {
-		t.Errorf("output = %q, want the completed video shown as 已完成", out.String())
+		t.Fatalf("listing asked the player endpoint: %d requests", n)
 	}
 	rows, err := st.ListVideosFiltered("", bvid)
 	if err != nil {
@@ -624,23 +609,16 @@ func TestProbeSkipsCompletedVideos(t *testing.T) {
 		t.Fatalf("rows = %+v, want the fetched state left untouched", rows)
 	}
 
-	// --force re-probes the same video and advances its state.
-	stats, err = rt.probe(context.Background(), io.Discard, bvid, "single", true, pipeline.DefaultSearchLimit, nil)
-	if err != nil {
+	// --force resets the completed row so the next download re-checks it.
+	if _, err := rt.probe(context.Background(), io.Discard, bvid, "single", true, pipeline.DefaultSearchLimit, nil); err != nil {
 		t.Fatalf("probe --force: %v", err)
-	}
-	if stats.Skipped != 0 {
-		t.Fatalf("stats.Skipped = %d, want 0 with force", stats.Skipped)
-	}
-	if n := atomic.LoadInt32(&playerRequests); n == 0 {
-		t.Fatal("probe --force did not ask the player endpoint")
 	}
 	rows, err = st.ListVideosFiltered("", bvid)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(rows) != 1 || rows[0].State != store.StateDownloadable {
-		t.Fatalf("rows = %+v, want state downloadable after force probe", rows)
+	if len(rows) != 1 || rows[0].State != store.StatePending {
+		t.Fatalf("rows = %+v, want state pending after --force", rows)
 	}
 }
 
@@ -884,15 +862,15 @@ func TestExportDisambiguatesLongMultiPartNames(t *testing.T) {
 	}
 }
 
-// TestProbeStopsWhenSessionExpired pins spec §八 for the probe leg: a -101 is a
-// whole-leg failure, so it must not mark the row failed and must tell the user
-// to log in. The unsigned view succeeds; the WBI-signed player call is where
-// the expired session surfaces.
+// TestProbeStopsWhenSessionExpired pins spec §八 for the listing leg: the WBI
+// signing key comes from nav, so an expired session surfaces during enumeration
+// and must stop the run instead of being reported as anything else. (The
+// subtitle check that used to surface it here moved into the download step,
+// whose own -101 test lives below.)
 func TestProbeStopsWhenSessionExpired(t *testing.T) {
+	const mid = "12345"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/x/web-interface/view":
-			_, _ = io.WriteString(w, `{"code":0,"message":"0","data":{"bvid":"BV1uv411q7Mv","aid":123,"cid":1001,"title":"视频","pubdate":1,"duration":10,"owner":{"mid":1,"name":"up"}}}`)
 		case "/x/web-interface/nav":
 			_, _ = io.WriteString(w, `{"code":-101,"message":"账号未登录"}`)
 		default:
@@ -907,7 +885,7 @@ func TestProbeStopsWhenSessionExpired(t *testing.T) {
 	defer rt.close()
 
 	var out strings.Builder
-	stats, err := rt.probe(context.Background(), &out, "BV1uv411q7Mv", "single", false, pipeline.DefaultSearchLimit, nil)
+	stats, err := rt.probe(context.Background(), &out, "https://space.bilibili.com/"+mid, "space", false, pipeline.DefaultSearchLimit, nil)
 	if !sessionExpired(err) {
 		t.Fatalf("err = %v, want the -101 session error", err)
 	}
@@ -924,12 +902,12 @@ func TestProbeStopsWhenSessionExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	rows, err := st.ListVideosFiltered("", "BV1uv411q7Mv")
+	rows, err := st.ListVideosFiltered("", mid)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(rows) != 1 || rows[0].State == store.StateFailed {
-		t.Fatalf("rows = %+v, want the row left not-failed", rows)
+	if len(rows) != 0 {
+		t.Fatalf("rows = %+v, want nothing listed when enumeration failed", rows)
 	}
 }
 
@@ -979,6 +957,20 @@ func TestDownloadStopsWhenSessionExpired(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].State != store.StateDownloadable {
 		t.Fatalf("rows = %+v, want the row left downloadable", rows)
+	}
+}
+
+// TestRiskControlIsAFatalDownloadFailure pins that a risk-control block stops the
+// download leg (like an expired session) instead of being retried per video -- a
+// 412 is on the session, so every remaining row would hit it too. The sentinel is
+// produced by the client (see bili.TestGetExhaustedRetriesIsARiskControlError).
+func TestRiskControlIsAFatalDownloadFailure(t *testing.T) {
+	err := fmt.Errorf("wrapped: %w", bili.ErrRiskControl)
+	if !riskControl(err) {
+		t.Fatal("riskControl must recognize the wrapped sentinel")
+	}
+	if !downloadFatal(err) {
+		t.Fatal("a risk-control block must be a whole-leg download failure")
 	}
 }
 
@@ -1032,6 +1024,67 @@ func TestDownloadAbortsOnUnmatchedLang(t *testing.T) {
 	}
 }
 
+// TestDownloadClassifiesNoSubtitleAndCharging pins where the subtitle check now
+// lives: the listing step no longer calls the player endpoint, so download is
+// what records no_subtitle / charging_locked. Neither is a failure, and a video
+// with a real track is still fetched -- all in one run.
+func TestDownloadClassifiesNoSubtitleAndCharging(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/x/player/v2":
+			switch r.URL.Query().Get("cid") {
+			case "1":
+				_, _ = io.WriteString(w, `{"code":0,"message":"0","data":{"subtitle":{"subtitles":[]}}}`)
+			case "2":
+				_, _ = io.WriteString(w, `{"code":-10403,"message":"充电专属"}`)
+			case "3":
+				fmt.Fprintf(w, `{"code":0,"message":"0","data":{"subtitle":{"subtitles":[{"lan":"zh-CN","subtitle_url":"http://%s/sub.json"}]}}}`, r.Host)
+			default:
+				t.Errorf("unexpected cid %q", r.URL.Query().Get("cid"))
+			}
+		case "/sub.json":
+			_, _ = io.WriteString(w, `{"body":[{"from":0,"to":1,"content":"你好"}]}`)
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	overrideEnumerator(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav")
+	overrideDownloader(t, srv.URL+"/x/player/v2")
+
+	rt := newTestRuntime(t)
+	defer rt.close()
+	st, err := rt.store()
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	for cid := int64(1); cid <= 3; cid++ {
+		if _, err := st.UpsertVideo(&store.Video{Bvid: fmt.Sprintf("BV1aaaa111%d", cid), Cid: cid, Title: "t", State: store.StatePending, SourceKey: "111"}); err != nil {
+			t.Fatalf("seed %d: %v", cid, err)
+		}
+	}
+
+	stats, err := rt.download(context.Background(), io.Discard, "", []string{"srt"}, false, defaultASRLang, "", "111", nil)
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if stats.Total != 3 || stats.Fetched != 1 || stats.NoSubtitle != 1 || stats.ChargingLocked != 1 || stats.Failed != 0 {
+		t.Fatalf("stats = %+v, want total=3 fetched=1 no_subtitle=1 charging=1 failed=0", stats)
+	}
+	rows, err := st.ListVideosFiltered("", "111")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	states := map[int64]string{}
+	for _, v := range rows {
+		states[v.Cid] = v.State
+	}
+	if states[1] != store.StateNoSubtitle || states[2] != store.StateChargingLocked || states[3] != store.StateFetched {
+		t.Fatalf("states = %v, want 1=no_subtitle 2=charging_locked 3=fetched", states)
+	}
+}
+
 // TestProbeSeasonKeysRowsByTheCollection pins the trap this feature exists to
 // close: a 合集 URL starts with space.bilibili.com/<mid>/, so before this the
 // probe silently returned the UP主's entire backlog instead of the collection
@@ -1062,7 +1115,6 @@ func TestProbeSeasonKeysRowsByTheCollection(t *testing.T) {
 	defer srv.Close()
 	overrideSeasonEnumerator(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav",
 		srv.URL+"/x/polymer/web-space/seasons_archives_list")
-	overrideProber(t, srv.URL+"/x/player/v2")
 
 	rt := newTestRuntime(t)
 	defer rt.close()
@@ -1116,7 +1168,6 @@ func TestProbeSingleVideoPointsAtItsSeason(t *testing.T) {
 	}))
 	defer srv.Close()
 	overrideEnumerator(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav")
-	overrideProber(t, srv.URL+"/x/player/v2")
 
 	rt := newTestRuntime(t)
 	defer rt.close()
@@ -1194,7 +1245,6 @@ func TestProbeSearchKeysRowsByKeywordAndStopsAtTheLimit(t *testing.T) {
 	defer srv.Close()
 	overrideEnumeratorWith(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav",
 		func(en *pipeline.Enumerator) { en.SearchBaseURL = srv.URL + "/x/web-interface/wbi/search/type" })
-	overrideProber(t, srv.URL+"/x/player/v2")
 
 	rt := newTestRuntime(t)
 	defer rt.close()
@@ -1246,7 +1296,6 @@ func TestProbeSingleVideoWithoutASeasonStaysQuiet(t *testing.T) {
 	}))
 	defer srv.Close()
 	overrideEnumerator(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav")
-	overrideProber(t, srv.URL+"/x/player/v2")
 
 	rt := newTestRuntime(t)
 	defer rt.close()

@@ -50,7 +50,12 @@ type Enumerator struct {
 	SearchBaseURL string
 	NavURL        string
 
-	signer *bili.WBISigner
+	signer        *bili.WBISigner
+	// Workers is how many listing bvids are resolved (the per-video view call)
+	// at once. Listings carry no cid, so every source resolves one per bvid; doing
+	// that serially stacked each request's latency on top of the rate limiter's
+	// wait. 0 or 1 means sequential.
+	Workers int
 	// mu guards signer: probes are dispatched concurrently, so the lazy build
 	// must not race on the field or fetch the nav keys twice.
 	mu sync.Mutex
@@ -68,10 +73,18 @@ func NewEnumerator(c *bili.Client) *Enumerator {
 	}
 }
 
-// ResolveVideo fetches a single video's full info (pages/cid included).
-func (e *Enumerator) ResolveVideo(ctx context.Context, bvid string) (*bili.VideoInfo, error) {
+// ResolveVideo fetches a single video's full info (pages/cid included). The id
+// may be a BV号 ("BV...") or an av号 ("av<digits>"); av is sent as aid so an old
+// link still resolves, and the view API always answers with the canonical bvid.
+func (e *Enumerator) ResolveVideo(ctx context.Context, id string) (*bili.VideoInfo, error) {
 	var info bili.VideoInfo
-	if err := e.Client.Get(ctx, e.ViewBaseURL, map[string]string{"bvid": bvid}, &info); err != nil {
+	params := map[string]string{}
+	if strings.HasPrefix(strings.ToLower(id), "av") {
+		params["aid"] = id[2:]
+	} else {
+		params["bvid"] = id
+	}
+	if err := e.Client.Get(ctx, e.ViewBaseURL, params, &info); err != nil {
 		return nil, err
 	}
 	return &info, nil
@@ -172,21 +185,34 @@ func (e *Enumerator) EnumerateSpace(ctx context.Context, mid string) ([]*bili.Vi
 // it -- 合集, UP主主页, 收藏夹 -- carries no cid, so this is where a source becomes
 // rows the rest of the pipeline can actually fetch. A video that is gone (-404)
 // is skipped rather than failing the whole listing; anything else is returned.
+//
+// The per-bvid calls run through the shared worker pool: they are independent,
+// and resolving them one at a time put each request's latency on top of the
+// limiter's wait. Results keep the listing order, so a truncated log or a page
+// still reads in source order.
 func (e *Enumerator) resolveAll(ctx context.Context, bvids []string) ([]*bili.VideoInfo, error) {
-	infos := make([]*bili.VideoInfo, 0, len(bvids))
-	for _, bvid := range bvids {
+	workers := e.Workers
+	if workers < 1 {
+		workers = 1
+	}
+	results := Run(ctx, bvids, workers, func(ctx context.Context, bvid string) (*bili.VideoInfo, error) {
 		if bvid == "" {
-			continue
+			return nil, nil
 		}
-		info, err := e.ResolveVideo(ctx, bvid)
-		if err != nil {
+		return e.ResolveVideo(ctx, bvid)
+	})
+	infos := make([]*bili.VideoInfo, 0, len(bvids))
+	for _, r := range results {
+		if r.Err != nil {
 			var apiErr *bili.APIError
-			if errors.As(err, &apiErr) && apiErr.Code == -404 {
+			if errors.As(r.Err, &apiErr) && apiErr.Code == -404 {
 				continue
 			}
-			return nil, err
+			return nil, r.Err
 		}
-		infos = append(infos, info)
+		if r.Value != nil {
+			infos = append(infos, r.Value)
+		}
 	}
 	return infos, nil
 }

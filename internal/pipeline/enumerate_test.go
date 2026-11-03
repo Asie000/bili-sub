@@ -27,6 +27,9 @@ func TestParseURL(t *testing.T) {
 	}{
 		{"https://www.bilibili.com/video/BV1uv411q7Mv", KindSingle, "BV1uv411q7Mv"},
 		{"BV1uv411q7Mv", KindSingle, "BV1uv411q7Mv"},
+		{"https://www.bilibili.com/video/av12345", KindSingle, "av12345"},
+		{"https://www.bilibili.com/video/AV12345", KindSingle, "av12345"},
+		{"av12345", KindSingle, "av12345"},
 		{"https://space.bilibili.com/12345", KindSpace, "12345"},
 		{"https://space.bilibili.com/12345/video", KindSpace, "12345"},
 		{"https://www.bilibili.com/medialist/play/12345?business=space", KindSpace, "12345"},
@@ -248,6 +251,7 @@ func TestParseURLForKind(t *testing.T) {
 	}{
 		{"https://www.bilibili.com/video/BV1uv411q7Mv", KindSingle, "BV1uv411q7Mv"},
 		{"BV1uv411q7Mv", KindSingle, "BV1uv411q7Mv"},
+		{"https://www.bilibili.com/video/av12345", KindSingle, "av12345"},
 		{"https://space.bilibili.com/12345", KindSpace, "12345"},
 		{"https://space.bilibili.com/12345/video", KindSpace, "12345"},
 		{"https://www.bilibili.com/medialist/play/12345?business=space", KindSpace, "12345"},
@@ -369,6 +373,33 @@ func TestResolveVideo(t *testing.T) {
 	}
 	if len(info.Pages) != 2 {
 		t.Fatalf("pages=%d want 2", len(info.Pages))
+	}
+}
+
+// TestResolveVideoByAv pins that an av号 is sent as aid (not bvid), and that
+// the resolved row still carries the canonical bvid the rest of the pipeline
+// keys on.
+func TestResolveVideoByAv(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("aid"); got != "12345" {
+			t.Errorf("aid=%q want 12345", got)
+		}
+		if got := r.URL.Query().Get("bvid"); got != "" {
+			t.Errorf("bvid=%q want empty for an av号", got)
+		}
+		w.Write([]byte(`{"code":0,"message":"0","data":{"bvid":"BV1uv411q7Mv","aid":12345,"cid":100,"title":"av 视频"}}`))
+	}))
+	defer srv.Close()
+
+	e := NewEnumerator(bili.NewClient("", nopLimiter{}))
+	e.ViewBaseURL = srv.URL
+
+	info, err := e.ResolveVideo(context.Background(), "av12345")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Bvid != "BV1uv411q7Mv" {
+		t.Fatalf("bvid=%q, want the resolved BV号", info.Bvid)
 	}
 }
 

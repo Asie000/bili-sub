@@ -24,7 +24,7 @@ const navWBIKeys = `{"code":0,"message":"0","data":{"wbi_img":{"img_url":"https:
 // hermetic.
 func overrideFullPipeline(t *testing.T, base string) {
 	t.Helper()
-	prevEn, prevProber, prevDownloader := newEnumerator, newProber, newDownloader
+	prevEn, prevDownloader := newEnumerator, newDownloader
 	newEnumerator = func(c *bili.Client) *pipeline.Enumerator {
 		c.FingerprintURL = base + "/x/frontend/finger/spi"
 		en := pipeline.NewEnumerator(c)
@@ -32,21 +32,13 @@ func overrideFullPipeline(t *testing.T, base string) {
 		en.NavURL = base + "/x/web-interface/nav"
 		return en
 	}
-	newProber = func(c *bili.Client, st *store.Store, en *pipeline.Enumerator) *pipeline.Prober {
-		p := pipeline.NewProber(c, st, en)
-		// A video whose aid is known goes through the signed endpoint, which is
-		// what a real run uses; both are aimed at the same fake path.
-		p.PlayerBaseURL = base + "/x/player/v2"
-		p.PlayerV2URL = base + "/x/player/v2"
-		return p
-	}
 	newDownloader = func(c *bili.Client, st *store.Store, en *pipeline.Enumerator, dir string) *pipeline.Downloader {
 		d := pipeline.NewDownloader(c, st, en, dir)
 		d.PlayerBaseURL = base + "/x/player/v2"
 		d.PlayerV2URL = base + "/x/player/v2"
 		return d
 	}
-	t.Cleanup(func() { newEnumerator, newProber, newDownloader = prevEn, prevProber, prevDownloader })
+	t.Cleanup(func() { newEnumerator, newDownloader = prevEn, prevDownloader })
 }
 
 // subtitlePipeServer serves one video that has a Chinese subtitle.

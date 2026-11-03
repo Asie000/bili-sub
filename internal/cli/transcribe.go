@@ -84,6 +84,21 @@ type transcribeStats struct {
 	Failed int
 }
 
+// audioResult is one prefetched download. index keeps progress and messages in
+// list order even though the download runs ahead of the transcription.
+type audioResult struct {
+	index int
+	video store.Video
+	path  string
+	err   error
+}
+
+// prefetchDepth is how many audios may be downloaded ahead of the transcriber.
+// One is enough to hide the network wait behind the GPU work; a deeper buffer
+// would only pile up several-MB files, since the worker decodes one file at a
+// time (its protocol is strictly one request/response).
+const prefetchDepth = 2
+
 // audioDir holds the temporary dash audio, one file per video, deleted as soon
 // as its transcript is stored.
 func (r *runtime) audioDir() string {
@@ -161,10 +176,11 @@ func (r *runtime) transcribe(ctx context.Context, out io.Writer, lang, model, so
 		// `download --transcribe` and the web UI all inherit it.
 		model = r.cfg.ASRModel
 	}
-	backend := newASRBackend(r.cfg.PythonPath, transcribeWorkerScript, model)
+	scriptPath := resolveRepoPath(transcribeWorkerScript)
+	backend := newASRBackend(r.cfg.PythonPath, scriptPath, model)
 	defer backend.Close()
 	fmt.Fprintf(out, "本地 ASR 后端：%s（Python=%s，脚本=%s）\n",
-		backend.Name(), r.cfg.PythonPath, transcribeWorkerScript)
+		backend.Name(), r.cfg.PythonPath, scriptPath)
 	// Ready the engine before touching any video. A missing Python or a missing
 	// faster-whisper is a whole-leg failure, so it must stop the run instead of
 	// being re-reported as one failure per video.
@@ -181,44 +197,76 @@ func (r *runtime) transcribe(ctx context.Context, out io.Writer, lang, model, so
 	}
 	tick := newProgressEmitter(stats.Total, onProgress)
 
-	for i, v := range videos {
+	// The audio for a video is downloaded while the previous one is being
+	// transcribed: the download is network-bound and the transcription is
+	// GPU-bound, so overlapping them takes the network wait off the critical
+	// path. The worker still decodes one file at a time -- its protocol is one
+	// request/response -- so this hides the wait without adding concurrency to
+	// the GPU.
+	audioCh := make(chan audioResult, prefetchDepth)
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer func() {
+		cancelRun()
+		// Whichever way this run ended, drop any audio the producer had already
+		// fetched but the loop never consumed, and let it finish unwinding.
+		for res := range audioCh {
+			if res.err == nil {
+				_ = os.Remove(res.path)
+			}
+		}
+	}()
+	go downloadAhead(runCtx, fetcher, videos, audioCh)
+
+	for res := range audioCh {
 		if err := ctx.Err(); err != nil {
+			if res.err == nil {
+				_ = os.Remove(res.path)
+			}
 			return stats, err
 		}
-		if err := r.transcribeOne(ctx, st, fetcher, backend, dir, v, lang); err != nil {
+		i, v := res.index, res.video
+		err := res.err
+		if err == nil {
+			err = r.transcribeFetched(ctx, st, backend, dir, v, lang, res.path)
+		}
+		switch {
+		case err == nil:
+			stats.OK++
+			fmt.Fprintf(out, "第 %d 项 %s 已转写（%s）\n", i+1, v.Bvid, lang)
+		case sessionExpired(err):
 			// An expired session (-101) is about the login, not about this video:
 			// every remaining row would fail identically, so stop and leave their
 			// state alone (spec §八: 判定 Cookie 失效，暂停并告警). A -400 is
 			// bilibili rejecting this one request, so it stays per-video.
-			if sessionExpired(err) {
-				fmt.Fprintf(out, "登录态失效，已停止转写（%v）。请先运行 `bili-sub login`；剩余 %d 个视频保持原状态。\n",
-					err, len(videos)-i-1)
-				return stats, err
-			}
+			fmt.Fprintf(out, "登录态失效，已停止转写（%v）。请先运行 `bili-sub login`；剩余 %d 个视频保持原状态。\n",
+				err, len(videos)-i-1)
+			return stats, err
+		case riskControl(err):
+			// Same shape as an expired session: a risk-control block is on the
+			// session, so every remaining video would hit it too.
+			fmt.Fprintf(out, "请求被 B站风控限流，已停止转写（%v）；剩余 %d 个视频保持原状态，等几分钟再重试。\n",
+				err, len(videos)-i-1)
+			return stats, err
+		case errors.Is(err, asr.ErrWorkerEngine):
 			// An engine failure (a model that cannot be loaded, the worker process
 			// dying) would repeat identically for every remaining video -- and each
 			// one only pays for that failure after downloading its full audio. Stop
 			// the leg instead (spec §八).
-			if errors.Is(err, asr.ErrWorkerEngine) {
-				fmt.Fprintf(out, "ASR 引擎不可用，已停止转写（%v）；剩余 %d 个视频保持原状态。\n",
-					err, len(videos)-i-1)
-				return stats, err
-			}
+			fmt.Fprintf(out, "ASR 引擎不可用，已停止转写（%v）；剩余 %d 个视频保持原状态。\n",
+				err, len(videos)-i-1)
+			return stats, err
+		case ctx.Err() != nil:
 			// A cancelled run is not a per-video failure: the in-flight video
 			// returns context.Canceled, and counting it would report a failure that
 			// never happened (downloadSubtitles and probe guard the same way).
-			if ctx.Err() != nil {
-				fmt.Fprintf(out, "已取消：完成 %d/%d，其余视频保持原状态。\n", stats.OK, stats.Total)
-				return stats, ctx.Err()
-			}
+			fmt.Fprintf(out, "已取消：完成 %d/%d，其余视频保持原状态。\n", stats.OK, stats.Total)
+			return stats, ctx.Err()
+		default:
 			stats.Failed++
 			fmt.Fprintf(out, "第 %d 项 %s 转写失败：%v\n", i+1, v.Bvid, err)
 			if serr := st.SetState(v.ID, store.StateFailed, v.Lang); serr != nil {
 				return stats, errors.Join(err, fmt.Errorf("标记 failed: %w", serr))
 			}
-		} else {
-			stats.OK++
-			fmt.Fprintf(out, "第 %d 项 %s 已转写（%s）\n", i+1, v.Bvid, lang)
 		}
 		tick(i + 1)
 	}
@@ -232,14 +280,36 @@ func (r *runtime) transcribe(ctx context.Context, out io.Writer, lang, model, so
 	return stats, nil
 }
 
-// transcribeOne turns one video's audio into a stored transcript. It owns the
-// temporary audio file from the moment it is downloaded: whatever happens next,
-// the file is gone when this returns.
-func (r *runtime) transcribeOne(ctx context.Context, st *store.Store, fetcher *pipeline.AudioFetcher, backend asr.Backend, dir string, v store.Video, lang string) error {
-	audioPath, err := fetcher.Fetch(ctx, v)
-	if err != nil {
-		return err
+// downloadAhead fetches each video's audio in list order and hands the path to
+// the transcriber over the channel. It is the network half of the pipeline: it
+// runs concurrently with the GPU half, so a download is already in flight while
+// the previous file is being transcribed. The channel is always closed, and the
+// caller owns (and removes) every path successfully delivered.
+func downloadAhead(ctx context.Context, fetcher *pipeline.AudioFetcher, videos []store.Video, ch chan<- audioResult) {
+	defer close(ch)
+	for i, v := range videos {
+		path, err := fetcher.Fetch(ctx, v)
+		select {
+		case ch <- audioResult{index: i, video: v, path: path, err: err}:
+		case <-ctx.Done():
+			// Nobody is going to consume this file: drop it rather than leak it.
+			if err == nil {
+				_ = os.Remove(path)
+			}
+			return
+		}
+		if err != nil && sessionExpired(err) {
+			// An expired session fails every remaining download identically, so stop
+			// fetching. The result just handed over still stops the run with the
+			// login message.
+			return
+		}
 	}
+}
+
+// transcribeFetched turns one already-downloaded audio file into a stored
+// transcript. It owns the file: whatever happens, it is gone when this returns.
+func (r *runtime) transcribeFetched(ctx context.Context, st *store.Store, backend asr.Backend, dir string, v store.Video, lang, audioPath string) error {
 	// The audio is the largest artifact in the whole pipeline and has no use
 	// after this call, so it is removed on the failure path too.
 	defer func() { _ = os.Remove(audioPath) }()

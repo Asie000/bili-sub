@@ -107,6 +107,15 @@ button:hover {
   font-size: 0.9rem;
 }
 
+/* A fixed how-to line gets a quiet tinted box so it reads as guidance rather
+   than as another muted footnote. */
+.hint.guide {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;

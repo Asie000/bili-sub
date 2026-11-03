@@ -61,10 +61,24 @@ type Progress struct {
 // failed part-way, so the counts are still reported alongside the reason.
 type DownloadSummary struct {
 	Fetched          int    `json:"fetched"`
+	NoSubtitle       int    `json:"no_subtitle"`
+	ChargingLocked   int    `json:"charging_locked"`
 	Failed           int    `json:"failed"`
 	Transcribed      int    `json:"transcribed"`
 	TranscribeFailed int    `json:"transcribe_failed"`
 	Error            string `json:"error,omitempty"`
+}
+
+// TranscribeSummary is the outcome of one ASR-only run, as returned by
+// POST /api/transcribe. Unlike DownloadSummary there is no fetch leg, so the
+// counters are only about transcription. Error is set when the run did some work
+// and then failed part-way, so the counts are still reported alongside the
+// reason.
+type TranscribeSummary struct {
+	Total       int    `json:"total"`
+	Transcribed int    `json:"transcribed"`
+	Failed      int    `json:"failed"`
+	Error       string `json:"error,omitempty"`
 }
 
 // LoginState is what GET /api/login/status reports.
@@ -91,7 +105,9 @@ type HandoffResponse struct {
 type Options struct {
 	Store       *store.Store
 	Probe       func(ctx context.Context, url, kind string, force bool, onProgress func(Progress)) (ProbeSummary, error)
+	ResolveURL  func(ctx context.Context, raw string) (string, error)
 	Download    func(ctx context.Context, lang string, transcribe bool, asrLang, model, source string, onProgress func(Progress)) (DownloadSummary, error)
+	Transcribe  func(ctx context.Context, asrLang, model, source string, onProgress func(Progress)) (TranscribeSummary, error)
 	Export      func(ctx context.Context, formats []string, includeExported bool, onProgress func(Progress)) (string, error)
 	Login       func(sessdata, cookie string) error
 	LoginStatus func(ctx context.Context) (LoginState, error)
@@ -137,6 +153,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stats", s.handleStats)
 	mux.HandleFunc("POST /api/probe", s.handleProbe)
 	mux.HandleFunc("POST /api/download", s.handleDownload)
+	mux.HandleFunc("POST /api/transcribe", s.handleTranscribe)
 	mux.HandleFunc("POST /api/export", s.handleExport)
 	mux.HandleFunc("POST /api/reset", s.handleReset)
 	mux.HandleFunc("POST /api/login/sessdata", s.handleSessdata)
@@ -317,6 +334,17 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "url 不能为空")
 		return
 	}
+	// A b23.tv share link only reveals its source after the redirect, so it is
+	// expanded before any parsing. The seam is optional: when it is nil (a test
+	// server, or serve wired without it) the URL is used as-is.
+	if s.opts.ResolveURL != nil {
+		resolved, err := s.opts.ResolveURL(r.Context(), strings.TrimSpace(req.URL))
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "无法解析短链: "+err.Error())
+			return
+		}
+		req.URL = resolved
+	}
 	// Resolve the source key and canonical kind here so the response can tell the
 	// page which source was probed. An explicitly chosen kind wins; otherwise the
 	// URL is auto-detected exactly as the CLI does.
@@ -391,7 +419,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		// worker that cannot start) is reported as a partial success with the
 		// reason attached: a 500 would throw the counts away and tell the page
 		// nothing happened, when in fact the subtitles are already on disk.
-		if summary.Fetched == 0 && summary.Transcribed == 0 && summary.Failed == 0 && summary.TranscribeFailed == 0 {
+		if summary.Fetched == 0 && summary.NoSubtitle == 0 && summary.ChargingLocked == 0 && summary.Transcribed == 0 && summary.Failed == 0 && summary.TranscribeFailed == 0 {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -400,6 +428,43 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.eventHub().Broadcast(Event{Type: "download", Data: summary})
+	writeJSON(w, http.StatusOK, summary)
+}
+
+// handleTranscribe is the standalone ASR leg: it transcribes every video that
+// is already known to have no subtitle, without touching the download leg. The
+// page offers it so a run that skipped 转写 can still catch up afterwards.
+func (s *Server) handleTranscribe(w http.ResponseWriter, r *http.Request) {
+	if s.opts.Transcribe == nil {
+		writeError(w, http.StatusNotImplemented, "transcribe 未启用")
+		return
+	}
+	var req struct {
+		AsrLang string `json:"asr_lang"`
+		Model   string `json:"model"`
+		Source  string `json:"source"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "请求体不是合法 JSON: "+err.Error())
+		return
+	}
+	onProgress := func(p Progress) {
+		s.eventHub().Broadcast(Event{Type: "progress", Data: p})
+	}
+	summary, err := s.opts.Transcribe(r.Context(), req.AsrLang, req.Model, req.Source, onProgress)
+	if err != nil {
+		// Same shape as the download handler: a run that transcribed some videos
+		// and then hit an expired session or a dead engine still reports its
+		// counts, because those 已转写 rows are already on disk.
+		if summary.Transcribed == 0 && summary.Failed == 0 {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if summary.Error == "" {
+			summary.Error = err.Error()
+		}
+	}
+	s.eventHub().Broadcast(Event{Type: "transcribe", Data: summary})
 	writeJSON(w, http.StatusOK, summary)
 }
 

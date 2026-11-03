@@ -7,3 +7,7 @@ exports/
 dist/
 __pycache__/
 *.exe
+.pytest_cache/
+*.egg-info/
+python/.venv/
+nul

@@ -29,6 +29,19 @@ const transcriptEngine = "bilibili"
 // must not mark the row failed or re-download it on the next run.
 var ErrNoTrackForLang = errors.New("pipeline: 没有匹配指定语言的字幕轨")
 
+// ErrNoSubtitle reports that the video has no subtitle track at all. Since the
+// subtitle check moved out of the listing step and into the download step, this
+// is now a normal classification the downloader records (state no_subtitle) and
+// moves on -- not a failure. It is distinct from ErrNoTrackForLang, which is
+// about the requested language: one is "this video has none", the other is
+// "this video has some, but not the family you asked for".
+var ErrNoSubtitle = errors.New("pipeline: 视频没有字幕轨")
+
+// ErrChargingLocked reports that the player endpoint refused the subtitle
+// because the video is 充电专属 (or otherwise not ours to fetch). It is recorded
+// as state charging_locked and never retried, like the prober used to do.
+var ErrChargingLocked = errors.New("pipeline: 充电专属，无法获取字幕")
+
 // subtitleHTTPTimeout bounds the subtitle-body fetch. The subtitle host is a CDN
 // and the payload is small, so this is deliberately shorter than a video fetch.
 const subtitleHTTPTimeout = 30 * time.Second
@@ -86,13 +99,19 @@ func (d *Downloader) FetchSubtitle(ctx context.Context, v store.Video, lang stri
 
 	track, _, ok, err := resolveSubtitleTrack(ctx, d.playerRequest(), v, lang)
 	if err != nil {
+		// The player endpoint refusing with a charge/permission code is a
+		// classification, not a failure: record it and stop retrying this video.
+		var apiErr *bili.APIError
+		if errors.As(err, &apiErr) && chargingCodes[apiErr.Code] {
+			return nil, fmt.Errorf("%w: %s（%s）", ErrChargingLocked, v.Bvid, apiErr.Message)
+		}
 		return nil, err
 	}
 	if !ok {
 		if lang != "" {
 			return nil, fmt.Errorf("%w：%s 没有 lang=%q 的字幕轨", ErrNoTrackForLang, v.Bvid, lang)
 		}
-		return nil, fmt.Errorf("pipeline: no subtitle track for %s with lang=%q", v.Bvid, lang)
+		return nil, fmt.Errorf("%w: %s", ErrNoSubtitle, v.Bvid)
 	}
 
 	segments, err := d.fetchBody(ctx, track.SubURL)

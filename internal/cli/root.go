@@ -72,10 +72,15 @@ func newRuntime(cmd *cobra.Command) (*runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	env = resolveEnvPath(env, cmd.Flags().Changed("env"))
 	cfg, err := config.Load(env)
 	if err != nil {
 		return nil, err
 	}
+	// A relative PYTHON_PATH in .env is resolved against the repo, not the
+	// shell's working directory: after moving the project, the venv moved with
+	// it and must still be found when the binary is started from elsewhere.
+	cfg.PythonPath = resolvePythonPath(cfg.PythonPath)
 	return &runtime{cfg: cfg}, nil
 }
 

@@ -47,7 +47,7 @@ func newExportCmd() *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().String("format", "srt,txt,json,md", "导出格式，逗号分隔：srt,txt,md,json")
+	cmd.Flags().String("format", "txt", "导出格式，逗号分隔：txt,srt,md,json（默认只导出 txt）")
 	cmd.Flags().Bool("include-exported", false, "连同已导出的字幕一起打包（默认只导出尚未导出的）")
 	return cmd
 }

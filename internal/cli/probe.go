@@ -7,7 +7,6 @@ import (
 	"io"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -22,13 +21,10 @@ import (
 // (done == total) always goes through.
 const progressInterval = 200 * time.Millisecond
 
-// newEnumerator and newProber are variables so tests can point the probe
-// pipeline at fake servers; production always uses the real constructors. This
-// mirrors the newQRLoginClient seam in serve.go.
-var (
-	newEnumerator = pipeline.NewEnumerator
-	newProber     = pipeline.NewProber
-)
+// newEnumerator is a variable so tests can point the probe pipeline at fake
+// servers; production always uses the real constructor. This mirrors the
+// newQRLoginClient seam in serve.go.
+var newEnumerator = pipeline.NewEnumerator
 
 // newProgressEmitter returns a per-item progress callback that forwards a tick
 // through emit, suppressing ticks that arrive within progressInterval of the
@@ -81,7 +77,7 @@ func newProbeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().String("kind", "", "来源类型（single/space/fav/season/search），空则按 URL 自动识别")
-	cmd.Flags().Bool("force", false, "重新探测已完成的视频（fetched/transcribed/exported）")
+	cmd.Flags().Bool("force", false, "重新列出并重置已完成的行（fetched/transcribed/exported）为待处理，让它们被重新检查/下载")
 	cmd.Flags().Int("limit", pipeline.DefaultSearchLimit, "搜索来源最多取多少条（0 = 不限）；其他来源忽略此项")
 	return cmd
 }
@@ -120,21 +116,29 @@ type probeStats struct {
 	FirstError string
 }
 
-// probeOutcome is what one worker learned about one video. err is carried in
-// the value (not as Run's error) so a per-video failure is distinguishable from
-// a cancelled run, which Run reports through Result.Err. skipped marks a video
-// that was already completed before this run and so was deliberately not probed.
-type probeOutcome struct {
-	result  *pipeline.ProbeResult
-	err     error
-	skipped bool
+// resolveInputURL expands a b23.tv share link into its real bilibili URL before
+// anything is parsed. Every other input is returned unchanged, so callers may run
+// it unconditionally. It needs the client, which is why it lives here and not in
+// the pure parser.
+func (r *runtime) resolveInputURL(ctx context.Context, raw string) (string, error) {
+	if !pipeline.IsShortLink(raw) {
+		return raw, nil
+	}
+	client, err := r.client()
+	if err != nil {
+		return "", err
+	}
+	return pipeline.ResolveShortLink(ctx, client, raw)
 }
 
 func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec string, force bool, limit int, onProgress func(done, total int)) (probeStats, error) {
 	var stats probeStats
 	var kind pipeline.SourceKind
 	var key string
-	var err error
+	rawURL, err := r.resolveInputURL(ctx, rawURL)
+	if err != nil {
+		return stats, err
+	}
 	if kindSpec != "" {
 		explicit, ok := pipeline.ParseSourceKind(kindSpec)
 		if !ok {
@@ -153,11 +157,17 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 		return stats, err
 	}
 	en := newEnumerator(client)
+	en.Workers = r.cfg.Concurrency
 
 	infos, err := collectVideos(ctx, en, kind, key, limit)
 	if err != nil {
 		if sessionExpired(err) {
 			msg := "登录态失效（" + err.Error() + "）。请先运行 `bili-sub login`。"
+			fmt.Fprintln(out, msg)
+			stats.FirstError = msg
+		}
+		if riskControl(err) {
+			msg := "请求被 B站风控限流，已停止列出（" + err.Error() + "）；等几分钟再重试。"
 			fmt.Fprintln(out, msg)
 			stats.FirstError = msg
 		}
@@ -192,15 +202,16 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 		return stats, nil
 	}
 	stats.Total = len(videos)
-
-	// A video already carried through download/transcribe/export must not be
-	// probed again: re-probing would overwrite its fetched state back to
-	// downloadable and (with it) discard the fact that its subtitle is stored.
-	// --force re-probes everything. The states are read back from the store
-	// after the upsert so a row that already existed keeps its persisted state
-	// (UpsertVideo never touches state on conflict).
-	completed := map[int64]string{}
-	if !force {
+	// Listing stops at enumeration and cid resolution: it deliberately does NOT
+	// ask the player endpoint whether each video has subtitles. That check moved
+	// into the download step (which records no_subtitle / charging_locked),
+	// because doing it here sent two requests per video in the step users run
+	// first -- the one that is meant to feel quick. New rows are left pending;
+	// rows that already existed keep their state (UpsertVideo never touches state
+	// on conflict), so re-listing a source never clobbers a downloaded one.
+	if force {
+		// --force now means "forget that these were already handled": reset the
+		// completed rows so the next download re-checks and re-fetches them.
 		existing, err := st.ListVideosFiltered("", key)
 		if err != nil {
 			return stats, err
@@ -208,120 +219,18 @@ func (r *runtime) probe(ctx context.Context, out io.Writer, rawURL, kindSpec str
 		for _, v := range existing {
 			switch v.State {
 			case store.StateFetched, store.StateTranscribed, store.StateExported:
-				completed[v.ID] = v.State
+				if err := st.SetState(v.ID, store.StatePending, ""); err != nil {
+					return stats, err
+				}
 			}
 		}
 	}
-
-	// Report progress from the workers. The emitter is shared by every worker
-	// goroutine, so its throttle guard and the counter are synchronized; the
-	// callback itself runs outside the lock so a slow SSE broadcast cannot
-	// serialize the workers.
-	var doneCount int64
 	if onProgress != nil {
 		onProgress(0, stats.Total)
+		onProgress(stats.Total, stats.Total)
 	}
-	tick := newProgressEmitter(stats.Total, onProgress)
-
-	prober := newProber(client, st, en)
-	// runCtx is cancelled when the first worker sees a whole-leg failure (an
-	// expired session), so the other in-flight requests stop instead of each
-	// burning a request and marking its own row failed.
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	abort := newLegAbort(cancel, sessionExpired)
-	outcomes := pipeline.Run(runCtx, videos, r.cfg.Concurrency, func(ctx context.Context, v store.Video) (probeOutcome, error) {
-		if _, skip := completed[v.ID]; skip {
-			tick(int(atomic.AddInt64(&doneCount, 1)))
-			return probeOutcome{skipped: true}, nil
-		}
-		res, err := prober.ProbeVideo(ctx, v)
-		tick(int(atomic.AddInt64(&doneCount, 1)))
-		if err == nil {
-			return probeOutcome{result: res}, nil
-		}
-		// An expired session is about the login, not this video: stop the whole
-		// run and leave every row's state alone (spec §八).
-		if abort.hit(err) {
-			return probeOutcome{err: err}, nil
-		}
-		// A failing video must not abort the rest of the run. A cancelled run
-		// is not a per-video failure, so it is left for `retry` to redo.
-		if ctx.Err() == nil {
-			if serr := st.SetState(v.ID, store.StateFailed, v.Lang); serr != nil {
-				err = errors.Join(err, fmt.Errorf("标记 failed: %w", serr))
-			}
-		}
-		return probeOutcome{err: err}, nil
-	})
-
-	stateFor := func(i int, v store.Video) string {
-		o := outcomes[i]
-		switch {
-		case o.Value.skipped:
-			stats.Skipped++
-			return "已完成"
-		case o.Value.result != nil && o.Value.result.ChargingLocked:
-			stats.ChargingLocked++
-			return "充电专属"
-		case o.Value.result != nil && o.Value.result.HasSubtitle:
-			stats.Downloadable++
-			return "可下载"
-		case o.Value.result != nil:
-			stats.NoSubtitle++
-			return "无字幕"
-		default:
-			// Either ProbeVideo failed, or the run was cancelled before this video
-			// was picked up. A cancelled run must not report the videos it never
-			// reached as failures. runCtx is used (not ctx) so an expired-session
-			// abort also lands here rather than counting as a failed video.
-			if runCtx.Err() != nil {
-				return "已取消"
-			}
-			stats.Failed++
-			return "失败"
-		}
-	}
-	langFor := func(i int, v store.Video) string {
-		res := outcomes[i].Value.result
-		if res == nil || !res.HasSubtitle {
-			return ""
-		}
-		if best, ok := pipeline.PickLang(res.Langs, ""); ok {
-			return best.Lan
-		}
-		return ""
-	}
-	if err := writeVideosTable(out, videos, stateFor, langFor); err != nil {
-		return stats, err
-	}
-	summary := "探测完成"
-	if abort.aborted() != nil {
-		summary = "探测中止"
-	}
-	fmt.Fprintf(out, "%s：共 %d，可下载 %d，无字幕 %d，充电锁定 %d，失败 %d，已完成 %d\n",
-		summary, stats.Total, stats.Downloadable, stats.NoSubtitle, stats.ChargingLocked, stats.Failed, stats.Skipped)
-	// The table shows only a 失败 marker, so print why each probe failed. Items
-	// cancelled by the abort are not failures, and the -101 that triggered it is
-	// reported once below rather than per row.
-	for i, o := range outcomes {
-		if o.Value.err == nil || errors.Is(o.Value.err, context.Canceled) || sessionExpired(o.Value.err) {
-			continue
-		}
-		if stats.FirstError == "" {
-			stats.FirstError = o.Value.err.Error()
-		}
-		fmt.Fprintf(out, "第 %d 项 %s 失败：%v\n", i+1, videos[i].Bvid, o.Value.err)
-	}
-	if aerr := abort.aborted(); aerr != nil {
-		msg := "登录态失效，已停止探测（" + aerr.Error() + "）。请先运行 `bili-sub login`；剩余视频保持原状态。"
-		fmt.Fprintln(out, msg)
-		stats.FirstError = msg
-		return stats, aerr
-	}
-	if ctx.Err() != nil {
-		return stats, ctx.Err()
-	}
+	fmt.Fprintf(out, "已列出 %d 条（来源 %s）。\n", stats.Total, key)
+	fmt.Fprintln(out, "下一步：`bili-sub download` 会检查每个视频有没有字幕并下载；没字幕的标为「无字幕」，之后可用 `bili-sub transcribe` 转写。")
 	return stats, nil
 }
 

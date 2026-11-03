@@ -3,6 +3,7 @@ package bili
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -90,6 +91,13 @@ type Client struct {
 // slice is a variable so tests can shrink it.
 var retryBackoffs = []time.Duration{2 * time.Second, 5 * time.Second, 12 * time.Second}
 
+// ErrRiskControl marks a request B站's risk control rejected with HTTP 412 (or
+// the generic 429) even after the retries above. It is a whole-leg failure:
+// every later request from the same session is likely to be blocked the same
+// way, so a caller stops and warns instead of paying the retry cost for every
+// remaining row only to mark them all failed.
+var ErrRiskControl = errors.New("bili: 请求被风控限流")
+
 func NewClient(sessdata string, limiter Limiter) *Client {
 	return &Client{
 		HTTP:           &http.Client{Timeout: 20 * time.Second},
@@ -140,7 +148,7 @@ func (c *Client) Get(ctx context.Context, rawURL string, params map[string]strin
 		if isRiskControlStatus(resp.StatusCode) {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
-			return fmt.Errorf("HTTP %d（B站风控限流）：请求过于频繁被临时拦截，请等几分钟再试；若持续出现，可在页面登录框粘贴浏览器完整 Cookie", resp.StatusCode)
+			return fmt.Errorf("%w（HTTP %d）：请求过于频繁被临时拦截，请等几分钟再试；若持续出现，可在页面登录框粘贴浏览器完整 Cookie", ErrRiskControl, resp.StatusCode)
 		}
 	}
 	defer resp.Body.Close()
@@ -162,6 +170,23 @@ func (c *Client) Get(ctx context.Context, rawURL string, params map[string]strin
 		return json.Unmarshal(env.Data, out)
 	}
 	return nil
+}
+
+// ResolveURL follows HTTP redirects and returns the address the request finally
+// landed on. It exists for b23.tv share links, whose path is an opaque token
+// that only the redirect turns into a real bilibili URL. The body is discarded;
+// only the final URL matters, so a short-link hop never has to parse a response.
+func (c *Client) ResolveURL(ctx context.Context, rawURL string) (string, error) {
+	resp, err := c.do(ctx, rawURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.Request != nil && resp.Request.URL != nil {
+		return resp.Request.URL.String(), nil
+	}
+	return rawURL, nil
 }
 
 // do issues one request with the browser headers and whatever cookies the

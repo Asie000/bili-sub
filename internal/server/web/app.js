@@ -15,7 +15,7 @@ let pageTotal = 0;
 
 const STATE_LABELS = {
   pending: "待处理",
-  probed: "已探测",
+  probed: "已获取",
   downloadable: "可下载",
   no_subtitle: "无字幕",
   charging_locked: "充电专属",
@@ -61,7 +61,7 @@ function log(message) {
 }
 
 // OP_LABELS names the long-running operations for the progress panel.
-const OP_LABELS = { probe: "探测", download: "获取字幕", transcribe: "转写", export: "导出" };
+const OP_LABELS = { probe: "获取列表", download: "获取字幕", transcribe: "转写", export: "导出" };
 
 // showProgress fills the persistent panel under the header. A tick with total 0
 // (an operation that reports no count) shows 0% and a done/0 label. The panel
@@ -86,15 +86,6 @@ function showFailure() {
   panel.hidden = false;
   $("progress-label").textContent = "失败";
   $("progress-fill").style.width = "0%";
-}
-
-// hideProgress hides the panel; it is used when an operation fails before it
-// can report any progress.
-function hideProgress() {
-  const panel = $("progress-panel");
-  if (panel) {
-    panel.hidden = true;
-  }
 }
 
 // beginProgress shows the bar for a locally started operation before the
@@ -202,15 +193,15 @@ async function loadStats() {
 async function probe() {
   const url = $("url").value.trim();
   if (!url) {
-    log("请输入链接再探测。");
+    log("请输入链接再获取列表。");
     return;
   }
   const button = $("probe");
   const label = button.textContent;
   button.disabled = true;
-  button.textContent = "探测中…";
+  button.textContent = "获取中…";
   beginProgress("probe");
-  log(`开始探测：${url}`);
+  log(`开始获取视频列表：${url}`);
   try {
     const summary = await post("/api/probe", {
       url,
@@ -219,9 +210,9 @@ async function probe() {
     });
     pageOffset = 0;
     if (summary.probed === 0) {
-      log(`探测完成：该来源没有视频（来源 ${summary.kind || "?"} ${summary.source || ""}）。`);
+      log(`获取完成：该来源没有视频（来源 ${summary.kind || "?"} ${summary.source || ""}）。`);
     } else {
-      log(`探测完成：共 ${summary.probed}，可下载 ${summary.downloadable}，无字幕 ${summary.no_subtitle}，充电锁定 ${summary.charging_locked}，失败 ${summary.failed}`);
+      log(`已列出 ${summary.probed} 条。点「获取字幕」会检查并下载；没字幕的会标为「无字幕」，之后可点「转写无字幕」。`);
     }
     // One video can be one episode of a 合集. The server decides that and sends
     // the sentence (with the link to paste) rather than expanding it here: a
@@ -238,7 +229,7 @@ async function probe() {
     await loadVideos();
   } catch (err) {
     showFailure();
-    log(`探测失败：${err.message}`);
+    log(`获取失败：${err.message}`);
   } finally {
     button.disabled = false;
     button.textContent = label;
@@ -270,29 +261,61 @@ async function download() {
 
 // describeDownload reports what a download run accomplished. The transcribed
 // counters only move when the ASR leg ran, so they are appended rather than
-// always shown.
+// always shown. no_subtitle/charging_locked are classifications the download
+// step discovers now that the list step no longer checks subtitles.
 function describeDownload(summary) {
-  let text = `获取字幕完成：成功 ${summary.fetched}，失败 ${summary.failed}`;
+  let text = `获取字幕完成：成功 ${summary.fetched}`;
+  if (summary.no_subtitle) {
+    text += `，无字幕 ${summary.no_subtitle}`;
+  }
+  if (summary.charging_locked) {
+    text += `，充电专属 ${summary.charging_locked}`;
+  }
+  text += `，失败 ${summary.failed}`;
   if (summary.transcribed || summary.transcribe_failed) {
     text += `；转写成功 ${summary.transcribed || 0}，失败 ${summary.transcribe_failed || 0}`;
   }
   return text;
 }
 
-// selectedFormats reads the format checkboxes the page offers. The server
-// rejects an empty list, so exportZip reports instead of posting one.
+// describeTranscribe reports what a standalone ASR run accomplished.
+function describeTranscribe(summary) {
+  if (!summary.total) {
+    return "没有需要转写的无字幕视频";
+  }
+  return `成功 ${summary.transcribed || 0}，失败 ${summary.failed || 0}`;
+}
+
+// transcribeNoSubtitle runs the ASR leg on its own, for videos that were already
+// probed as no_subtitle but not transcribed (the caller did not check
+// 「无字幕时转写」at download time).
+async function transcribeNoSubtitle() {
+  const asrLang = $("asr-lang").value;
+  const model = $("asr-model").value.trim();
+  log(`开始转写无字幕视频（语言 ${asrLang || "自动"}${model ? "，模型 " + model : ""}）…`);
+  beginProgress("transcribe");
+  try {
+    const summary = await post("/api/transcribe", { asr_lang: asrLang, model });
+    log(`转写完成：${describeTranscribe(summary)}`);
+    if (summary.error) {
+      log(`注意：${summary.error}`);
+    }
+    await loadVideos();
+  } catch (err) {
+    showFailure();
+    log(`转写失败：${err.message}`);
+  }
+}
+
+// selectedFormats is fixed to txt: the export is meant to be a plain-text
+// reading copy. The server still accepts srt/vtt/ass/json/md, so other formats
+// remain one API call (or one --format) away without touching the pipeline.
 function selectedFormats() {
-  return Array.from(document.querySelectorAll(".export-format"))
-    .filter((box) => box.checked)
-    .map((box) => box.value);
+  return ["txt"];
 }
 
 async function exportZip() {
   const formats = selectedFormats();
-  if (formats.length === 0) {
-    log("请至少选择一种导出格式。");
-    return;
-  }
   const includeExported = $("include-exported").checked;
   log(`开始导出（${formats.join(",")}${includeExported ? "，含已导出" : ""}）…`);
   beginProgress("export");
@@ -312,11 +335,6 @@ async function exportZip() {
     showFailure();
     log(`导出失败：${err.message}`);
   }
-}
-
-// updateExportHint mirrors the checked export formats into the hint beside them.
-function updateExportHint() {
-  $("export-hint").textContent = `已选 ${selectedFormats().length} 种`;
 }
 
 // looksLikeCookie mirrors bili.LooksLikeCookie: a full browser Cookie header
@@ -408,19 +426,10 @@ function applyLoginStatus(state) {
   el.classList.remove("ok");
 }
 
-function clearTable() {
-  $("videos-body").textContent = "";
-  $("stats").textContent = "";
-  hideProgress();
-  $("log").textContent = "";
-  log("已清空列表与进度。");
-}
-
-// clearData is the destructive counterpart to clearTable: it asks the server to
-// drop every stored video/transcript, then reloads the now-empty list. It is
-// confirm-gated because the action cannot be undone.
+// clearData drops every stored video/transcript, then reloads the now-empty
+// list. It is confirm-gated because the action cannot be undone.
 async function clearData() {
-  if (!confirm("确定清空所有已探测/已下载的数据吗？此操作不可恢复。")) {
+  if (!confirm("确定清空所有已获取/已下载的数据吗？此操作不可恢复。")) {
     return;
   }
   try {
@@ -437,9 +446,11 @@ function formatEvent(ev) {
   const data = ev.data || {};
   switch (ev.type) {
     case "probe":
-      return `探测事件：共 ${data.probed}，可下载 ${data.downloadable}，无字幕 ${data.no_subtitle}，充电锁定 ${data.charging_locked}，失败 ${data.failed}`;
+      return `获取事件：已列出 ${data.probed} 条`;
     case "download":
       return `下载事件：${describeDownload(data)}`;
+    case "transcribe":
+      return `转写事件：${describeTranscribe(data)}`;
     case "export":
       return `导出事件：${data.zip}`;
     case "reset":
@@ -449,7 +460,7 @@ function formatEvent(ev) {
     case "handoff": {
       const parts = [];
       if (data.url) {
-        parts.push("已填入插件发来的链接，请点「探测」");
+        parts.push("已填入插件发来的链接，请点「获取视频列表」");
       }
       if (data.logged_in) {
         parts.push(`登录成功${data.uname ? `（${data.uname}）` : ""}`);
@@ -532,6 +543,7 @@ function connectEvents() {
 
 $("probe").addEventListener("click", probe);
 $("download").addEventListener("click", download);
+$("transcribe-only").addEventListener("click", transcribeNoSubtitle);
 // The ASR controls only matter when the transcribe box is ticked.
 function syncTranscribeControls() {
   const on = $("transcribe").checked;
@@ -542,7 +554,6 @@ $("transcribe").addEventListener("change", syncTranscribeControls);
 syncTranscribeControls();
 $("export").addEventListener("click", exportZip);
 $("refresh").addEventListener("click", loadVideos);
-$("clear").addEventListener("click", clearTable);
 $("clear-data").addEventListener("click", clearData);
 $("page-prev").addEventListener("click", () => {
   pageOffset = Math.max(0, pageOffset - PAGE_SIZE);
@@ -557,9 +568,6 @@ $("page-next").addEventListener("click", () => {
 });
 $("save-sessdata").addEventListener("click", saveSessdata);
 $("qr-login").addEventListener("click", qrLogin);
-document.querySelectorAll(".export-format").forEach((box) =>
-  box.addEventListener("change", updateExportHint));
-updateExportHint();
 
 loadVideos();
 connectEvents();

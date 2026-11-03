@@ -2,6 +2,7 @@ package bili
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -63,6 +64,31 @@ func TestGetAPIError(t *testing.T) {
 	}
 	if !ae.Unauthorized() {
 		t.Fatal("should be unauthorized")
+	}
+}
+
+// TestGetExhaustedRetriesIsARiskControlError pins the sentinel every caller keys
+// on: once the retries are used up and B站 is still answering 412, the error must
+// wrap ErrRiskControl so a whole leg stops instead of retrying each remaining
+// row and marking them all failed.
+func TestGetExhaustedRetriesIsARiskControlError(t *testing.T) {
+	shrinkRetryBackoff(t)
+	fp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"code":0,"data":{"b_3":"B3VALUE","b_4":"B4VALUE"}}`)
+	}))
+	defer fp.Close()
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusPreconditionFailed)
+	}))
+	defer api.Close()
+
+	c := NewClient("SESS", nopLimiter{})
+	c.FingerprintURL = fp.URL
+
+	err := c.Get(context.Background(), api.URL, nil, nil)
+	if !errors.Is(err, ErrRiskControl) {
+		t.Fatalf("err = %v, want it to wrap ErrRiskControl", err)
 	}
 }
 
@@ -315,5 +341,30 @@ func TestAPIErrorSessionExpiredIsNarrowerThanUnauthorized(t *testing.T) {
 	}
 	if !expired.Unauthorized() || !rejected.Unauthorized() {
 		t.Error("Unauthorized must keep covering both codes: it is exported API")
+	}
+}
+
+// TestResolveURLFollowsRedirect pins that ResolveURL reports the address a
+// redirect chain ends on, which is the whole point of the b23.tv short-link
+// support: the token's meaning only exists after the hop.
+func TestResolveURLFollowsRedirect(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer target.Close()
+
+	final := target.URL + "/video/BV1uv411q7Mv"
+	short := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, final, http.StatusFound)
+	}))
+	defer short.Close()
+
+	c := NewClient("", nopLimiter{})
+	got, err := c.ResolveURL(context.Background(), short.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != final {
+		t.Fatalf("ResolveURL = %q, want %q", got, final)
 	}
 }

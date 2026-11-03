@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "bili-sub 桥接",
+  "version": "1.0.0",
+  "description": "把当前 B站 页面的登录 Cookie 与链接一键发送给本机 bili-sub 工具。",
+  "permissions": ["cookies", "tabs", "storage"],
+  "host_permissions": [
+    "https://*.bilibili.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "action": {
+    "default_title": "发送 Cookie 与链接给 bili-sub",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "scripts": ["background.js"]
+  }
+}

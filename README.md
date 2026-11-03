@@ -1,245 +1,491 @@
-# Bilibili 批量字幕采集与本地 ASR 转写流水线
+# bili-sub · B 站批量字幕采集与本地 ASR 转写
 
-> **定位**：一个以「实战学习 Go 语言」为核心驱动、面向个人大规模（千级视频）使用的 B 站字幕批量提取与离线 ASR 转写工具。
+一个跑在本机的命令行工具 + 网页界面：按 UP主、收藏夹、合集或搜索关键词批量抓 B 站字幕；
+没有字幕的视频，用本地 **faster-whisper** 离线转写；最后打包成 TXT / SRT / MD / JSON。
 
----
+- **不用登录也能列表**，但下载音频和搜索需要登录态（支持扫码 / Cookie）。
+- **不需要 ffmpeg**：dash 音频 `.m4s` 直接交给 faster-whisper 解码。
+- **不会把视频下载下来**：只取字幕和临时音频，转写完立即删音频。
+- 上千个视频可断点续传；Ctrl+C 可优雅退出，不会把在途视频标成失败。
 
-## 一、 项目背景与核心目标
-
-1. **业务目标**：
-   - 支持按 **UP主空间（UID）**、**收藏夹（FID）**、**视频合集（Season/Collection）** 批量枚举视频。
-   - 优先拉取 B 站自带的官方/AI 字幕（转换保存为 `.srt` 等格式）。
-   - 对无字幕视频，自动下载 dash 音频流（`.m4s`，不转码、不落 wav），调用本地 **Whisper** 模型补齐转写。
-   - 稳健支撑 **上千个视频** 的离线批处理，具备断点续传、失败重试、自动去重、风控退避机制。
-   - 支持多格式导出（SRT / VTT / ASS / TXT / JSON）。
-
-2. **技术学习目标（Java 背景转向 Go）**：
-   - 告别抽象过度与繁重框架，掌握 **Idiomatic Go（地道 Go 语法）**。
-   - 深度掌握 Go 的杀手级特性：**Goroutine + Channel 并发调度**、**`net/http` 标准库**、**结构体与标签反序列化**、**`os/exec` 子进程控制**、**`database/sql` 事务**。
-   - 体验单二进制独立分发与高性能 I/O 并发的开发心智。
+> 设计思路、架构图和 Go 学习路线见 [docs/DESIGN.md](docs/DESIGN.md)。
 
 ---
 
-## 二、 总体架构设计
+## 目录
 
-流水线采用 **控制面与算力数据面解耦** 的经典架构：
+- [一、环境要求](#一环境要求)
+- [二、部署](#二部署)
+- [三、登录 B 站](#三登录-b-站)
+- [四、命令行用法](#四命令行用法)
+- [五、网页界面](#五网页界面)
+- [六、浏览器插件（可选）](#六浏览器插件可选)
+- [七、配置项](#七配置项)
+- [八、输出文件与状态](#八输出文件与状态)
+- [九、常见问题](#九常见问题)
+- [十、Python 版](#十python-版)
+- [十一、目录结构](#十一目录结构)
 
+---
+
+## 一、环境要求
+
+| 依赖 | 版本 / 说明 |
+|---|---|
+| 操作系统 | Windows 10/11（主要开发和验证平台）；Linux/macOS 理论上可用，命令里的 `.exe` 改成无后缀即可 |
+| Go | **1.27 或更新**（`go.mod` 要求）；只有从源码编译才需要 |
+| Python | **3.9–3.12**，仅本地转写需要；3.13+ 通常没有 faster-whisper 预编译包 |
+| uv 或 pip | 用来建 Python 虚拟环境，任选 |
+| 磁盘 | 字幕很小；模型缓存约 0.5–3 GB（按模型大小）；临时音频每条几 MB 到几十 MB，转写完自动删 |
+| GPU | 可选。NVIDIA + CUDA 运行库会走 `cuda/float16`，否则自动降级 `cpu/int8` |
+
+---
+
+## 二、部署
+
+### 1. 获取代码并编译
+
+```powershell
+cd C:\Users\lsy1\Desktop\BiliBili
+go build -o bili-sub.exe ./cmd/bili-sub
 ```
-                    ┌──────────────────────────────────────────────┐
-                    │               Go 核心控制面                   │
-                    │                                              │
-                    │  1. 登录 / Cookie 管理 (SESSDATA)            │
-                    │  2. WBI 签名计算 (Nav 接口 + MD5)             │
-                    │  3. 全量分页枚举 (空间 / 收藏夹 / 合集)        │
-                    │  4. 并发任务调度 (Goroutine Worker Pool)     │
-                    │  5. 令牌桶限流 (rate.Limiter，防 412 风控)    │
-                    │  6. 多格式渲染 (Canonical IR -> SRT/VTT/ASS) │
-                    └───────┬──────────────────────────────┬───────┘
-                            │                              │
-                   有字幕直接下载落盘              无字幕时下载 dash 音频
-                            │                      （data/audio/*.m4s）
-                            ▼                              │
-                    ┌──────────────┐                       ▼
-                    │  本地字幕库   │              ┌───────────────┐
-                    │ (.srt / .vtt)│              │ SQLite 任务表 │
-                    └──────────────┘              └───────┬───────┘
-                                                          │
-                                                    轮询 / 任务消费
-                                                          │
-                                                          ▼
-                                                  ┌───────────────┐
-                                                  │ ASR 推理引擎  │
-                                                  │ (Python Worker│
-                                                  │ 或 whisper.cpp)│
-                                                  └───────────────┘
+
+编译产物是单个 `bili-sub.exe`，网页也内嵌在里面，不需要 Node、不需要再带静态文件。
+
+也可以不编译直接跑：
+
+```powershell
+go run ./cmd/bili-sub --help
 ```
 
-### 实现现状（2026-10-11）
+> **必须在仓库根目录运行**（或者用 `start-serve.bat`，它会自动 `cd` 到脚本所在目录）。
+> 原因：ASR worker 脚本 `scripts/transcribe_worker.py` 是按当前工作目录找的，换个目录启动会报
+> 「找不到 worker 脚本」。
 
-`playurl → dash 音频 → 本地 ASR → srt/IR → 导出` 这条链路已打通，并有真实端到端验证
-（首个冒烟测试：223 秒音频 + `tiny` 模型 + CPU int8，25 秒出 84 条字幕）。与最初计划不同的两个决定：
+### 2. 建本地 ASR 环境（只用官方字幕可跳过）
 
-1. **不用 ffmpeg**。faster-whisper 靠 PyAV 解码，`.m4s` 直接喂给 worker 即可，少一次转码、少一次落盘。
-2. **CUDA 缺失自动降级**。ctranslate2 只在真正推理时才发现 `cublas64_12.dll` 缺失，worker 会捕获并改用 `cpu/int8`；装了 CUDA 库则自动走 `cuda/float16`。降级只在 GPU **从未成功过**时生效——已经成功过之后再失败，那是文件的问题，不该把整批拖慢 20 倍。
+**方式 A：uv（推荐）**
 
-本地 ASR 环境（一次性）。**venv 要建在 `data/` 之外**，因为 `bili-sub reset --yes` 会删掉整个 `data/`：
-
-```bash
+```powershell
+cd C:\Users\lsy1\Desktop\BiliBili
 uv venv --python 3.12 .asr-venv
-uv pip install --python .asr-venv/Scripts/python.exe faster-whisper "av<19"
+uv pip install --python .asr-venv\Scripts\python.exe faster-whisper "av<19"
 ```
 
-- `av>=19` 与 faster-whisper 1.2.1 不兼容（`open() got an unexpected keyword argument 'metadata_errors'`），必须 pin `av<19`。
-- 然后在 `.env` 里设 `PYTHON_PATH=<仓库>\.asr-venv\Scripts\python.exe`（系统默认 Python 若是 3.13+ 会装不上 faster-whisper）。
-- 不设 `PYTHON_PATH` 时按 `python` → `python3` 的顺序找解释器（Windows 一般只有 `python`，Linux/macOS 往往只有 `python3`）；两个都找不到会**直接报「找不到 Python 解释器」并告诉你去设 `PYTHON_PATH`**，而不是含含糊糊地说「无法 import faster_whisper」。写了绝对路径就完全按你写的来，不会再替你换。
-- ⚠️ 切勿把 venv 放进 `data/`：`bili-sub reset --yes` 执行的是 `os.RemoveAll(dataDir)`，会把整个 Python 环境和已装依赖一起删掉。
-- GPU 可选：`uv pip install --python .asr-venv/Scripts/python.exe nvidia-cublas-cu12 nvidia-cudnn-cu12` 后 worker 自动走 `cuda/float16`；没装 CUDA 运行库也不影响，会自动降级 `cpu/int8`。（同一台 4060、同一段 268 秒音频、`small` 模型：GPU float16 24 秒，CPU int8 8 分 16 秒，约 20 倍。）
-- **模型怎么选**（实测，RTX 4060 Laptop，同一段 268 秒中文音频）：
+**方式 B：系统 Python + venv**
 
-  | 模型 | GPU float16 | 段数 | 质量 |
-  |---|---|---|---|
-  | `tiny` | 12 秒 | 199 | 差（「二十二水双鸡本科毕业」），只适合冒烟测试 |
-  | `small` | 23 秒 | 164 | 一般 |
-  | `large-v3-turbo` | **25 秒** | 108 | 明显更好 |
+```powershell
+cd C:\Users\lsy1\Desktop\BiliBili
+py -3.12 -m venv .asr-venv
+.\.asr-venv\Scripts\python.exe -m pip install -U pip
+.\.asr-venv\Scripts\python.exe -m pip install faster-whisper "av<19"
+```
 
-  turbo 比 small 只慢 2 秒，但每处不一致几乎都是 turbo 对（月入/跃入、清北/青北、被裁/备财、没背景没资源/没被解为资源、几点/级点），断句也更整。**有 GPU 就用 turbo**。
-  纯 CPU 上 `small` int8 已是 8 分 16 秒，turbo 只会更慢，所以 CPU 用户先留在 `small`。
-- **模型名写一次就行**：在 `.env` 里设 `ASR_MODEL=large-v3-turbo`，`transcribe` / `download --transcribe` / 网页端都生效；临时换用 `--model` 覆盖。优先级：`--model` > `ASR_MODEL` > worker 默认（`small`）。不设 `ASR_MODEL` 时不会自动下载大模型，避免新环境一上手就拉几个 GB。
-  - 模型名写错或加载失败会**整批停下**并一次说清（不再给每个视频下载完音频才失败）；键名写错也一样：`.env` 里的未知键会直接报错，不会静默忽略。
-- **输出会先洗一遍**（在 Go 侧做，对所有后端生效）：去掉 Whisper 漏出的 `<\|0.00\|>` 类特殊标记、丢掉乱码段和空段、去掉汉字之间多余的空格、**合并连续重复段**（静音/音乐上 Whisper 会卡住重复同一句，这是最常见的幻觉）、繁体转简体。保留繁体用 `ASR_SIMPLIFY=0`。
-  - 实测（同一段 268 秒音频）：`tiny` 原始输出有 **175 种繁体字**，清理后 0 种；`small` 本来就不带繁体——所以繁体主要是**小模型**的问题。
-- 网页端也能选：勾上「无字幕时转写」后，旁边的**转写语言**和**模型**输入框会解锁；留空则用 `.env` 的 `ASR_MODEL`。转写在导出之前跑，转写失败**不会丢掉已下载的字幕**（导出照常，页面给出带计数的警告）。
-- 音频接口要求登录态：匿名请求 `playurl` 会得到 `-101 账号未登录`，先跑 `bili-sub login`。
-- **字幕语言按语言族匹配**：`--lang zh-Hans` 能选到标注 `zh-CN`/`zh`/`ai-zh` 的轨道，`--lang en` 能选到 `en-US`；但 `zh-Hans` 不会选 `zh-Hant`（脚本相反）。如果整批视频都没有匹配的轨道（比如 `--lang ja`），下载会**整批停下**、行状态保持可下载，而不是把每条都标失败。
-- **合集也能抓**：直接粘合集链接（`space.bilibili.com/<mid>/channel/collectiondetail?sid=<sid>`，或新的 `.../lists/<sid>?type=season`）。粘**单视频**链接时，若它属于某个合集，会提示「这条视频属于合集《X》，共 N 条」并给出可粘贴的合集链接（命令行和网页都会提示；默认**不**自动把 31 条都抓下来）。视频选集（series）暂不支持，会明确报错。
-  - ⚠️ 同一批视频若先用别的来源（如 UP主空间）抓过，再按合集抓会**把行的来源键改成合集键**；之后按旧键 `--source <mid>` 过滤会查不到（不报错，返回 0 条）。
-- **也能按关键词搜**：`bili-sub probe --kind search --limit 20 劳动法`（网页端来源类型选「搜索关键词」）。搜索是**登录接口**。一个词最多能出 1000 条、每条还要再查一次，所以默认**只取 50 条**，命令行用 `--limit` 改（`--limit 0` = 不限，负数会报错）；**网页端固定取 50 条，目前不可调**。`--source` 的关键词会自动归一化（多余空白不影响匹配）。抓完用 `download --source search:劳动法` 接着跑。
-- **Ctrl+C 是优雅退出**：中途按 Ctrl+C 会停下来、**不把在途视频标成失败**、临时音频文件也删掉（第一次 Ctrl+C 取消，第二次恢复默认行为立刻退出；非 Windows 上 `SIGTERM`（`docker stop`）同理）。中途音频目录 `data/audio/` 由 `transcribe` 每次开始时清理 30 分钟以上的旧文件，所以被硬杀（关终端/断电）也不会越积越多；只清旧文件是因为两个终端可能共用同一个 `data/`。
+两个注意点：
+
+- **必须 pin `av<19`**。`av>=19` 和 faster-whisper 1.2.x 不兼容，第一次解码就会报
+  `open() got an unexpected keyword argument 'metadata_errors'`。
+- **venv 不要放进 `data/`**。`bili-sub reset --yes` 会删掉整个数据目录，连 Python 环境一起删。
+  `.asr-venv/` 放在仓库根目录即可，`.gitignore` 已经排除。
+
+**GPU（可选）**：
+
+```powershell
+uv pip install --python .asr-venv\Scripts\python.exe nvidia-cublas-cu12 nvidia-cudnn-cu12
+```
+
+装了这两个包，worker 自动走 `cuda/float16`；没装也不影响，自动降级 `cpu/int8`。
+
+### 3. 配置 `.env`
+
+在仓库根目录复制一份配置模板，再按需修改（`.env` 已被 `.gitignore` 忽略）：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+`.env` 内容示例：
+
+```dotenv
+# 本地 ASR 的 Python 解释器（绝对路径最稳；相对路径按「当前工作目录」解析）
+PYTHON_PATH=C:\Users\lsy1\Desktop\BiliBili\.asr-venv\Scripts\python.exe
+
+# 转写模型。留空/注释掉 = worker 默认 small；有 GPU 推荐 large-v3-turbo
+ASR_MODEL=large-v3-turbo
+
+# 限流与并发（默认 2 req/s、3 并发，保守值）
+BILI_QPS=2
+BILI_CONCURRENCY=3
+```
+
+> **移动过项目目录？** 现在 `.env` 默认用相对路径 `.asr-venv\Scripts\python.exe`，代码会依次按「当前目录 → `bili-sub.exe` 所在目录」查找，所以只要 venv 跟着项目一起移动，就不用改配置。
+> 数据目录仍按当前目录解析，所以还是建议在仓库根目录启动。
+
+验证 Python 环境是否可用：
+
+```powershell
+.\.asr-venv\Scripts\python.exe -c "import faster_whisper, av; print('ok')"
+```
+
+### 4. 启动
+
+命令行：
+
+```powershell
+.\bili-sub.exe --help
+```
+
+网页界面（双击 `start-serve.bat` 也可以）：
+
+```powershell
+.\bili-sub.exe serve
+```
+
+然后打开 <http://127.0.0.1:8080>。
 
 ---
 
-### 核心解耦原则
-- **控制面（Go）**：专注网络 I/O、协议解析、防封限流、任务去重、文件管理。
-- **数据面（Python / C++）**：专注 GPU 显存利用、VAD 切分、批量推理，模型常驻内存。
-- **中间格式（Canonical IR）**：转写结果统一先存通用中间结构，多格式导出纯在内存中转换，**绝不因为换格式重跑模型**。
+## 三、登录 B 站
+
+下载音频（`playurl`）和搜索接口都要求登录态，先登录一次。三种方式任选其一：
+
+```powershell
+# 1) 扫码（最省事）
+.\bili-sub.exe login --qr
+
+# 2) 整段 Cookie（最稳，能明显降低 412 概率）
+#    浏览器 F12 → 网络 → 任意请求 → 请求头 Cookie，整段复制
+.\bili-sub.exe login --cookie "SESSDATA=...; bili_jct=...; DedeUserID=..."
+
+# 3) 只给 SESSDATA
+.\bili-sub.exe login --sessdata "你的SESSDATA"
+```
+
+登录信息保存在 `data/session.json`，之后所有命令自动读取。
+`reset --yes` 会连它一起删掉，需要重新登录。
+
+> Cookie 只存在本机，不会上传到任何服务器；也不要把它提交到 Git。
 
 ---
 
-## 三、 技术栈选型
+## 四、命令行用法
 
-| 模块 | 技术选型 | 选用理由 |
+所有命令都支持 `--env <路径>` 指定另一份配置文件（默认 `.env`）。
+
+### `run`：一条命令跑完整条流水线
+
+```powershell
+.\bili-sub.exe run "https://www.bilibili.com/video/BV1xx411c7mD"
+```
+
+顺序是：枚举 → 探测 → 下载 → 转写（默认开）→ 导出 TXT。
+转写失败不会丢掉已下载的字幕，导出照常执行，最后以非零退出码报错。
+
+常用选项：
+
+```powershell
+# 只要官方字幕，不转写；导出 srt + txt
+.\bili-sub.exe run --transcribe=false --format srt,txt "<URL>"
+
+# 换模型 / 换转写语言
+.\bili-sub.exe run --model large-v3-turbo --asr-lang zh "<URL>"
+
+# 统一字幕语言（默认自动选）
+.\bili-sub.exe run --lang zh "<URL>"
+
+# 重新处理已经完成的视频
+.\bili-sub.exe run --force "<URL>"
+
+# 搜索关键词（默认只取 50 条；0 = 不限）
+.\bili-sub.exe run --kind search --limit 50 "劳动法"
+```
+
+### 分步执行
+
+| 命令 | 作用 | 常用选项 |
 |---|---|---|
-| **核心开发语言** | **Go 1.22+** | 高并发 I/O、极低内存开销、编译成独立二进制、学习目标语言 |
-| **网络请求** | Go 标准库 `net/http` | 零第三方重依赖，配合连接池已足够强悍 |
-| **并发与限流** | `sync.WaitGroup` + `Channel` + `golang.org/x/time/rate` | Go 的并发招牌，令牌桶平滑限流防 412 |
-| **本地状态存储** | **SQLite** (`modernc.org/sqlite` 纯 Go 驱动) | 免 CGO 编译，单文件自包含，轻松支持数万条记录 |
-| **命令行交互** | `spf13/cobra` 或标准库 `flag` | 构建工业级 CLI 体验（`run`、`status`、`retry`） |
-| **音频抽取处理** | **不需要 ffmpeg**：faster-whisper 依赖的 PyAV 自带解码器，直接喂 `.m4s` | 省掉一次转码 + 一次落盘（一小时 wav 约 115MB）；`os/exec` 调 ffmpeg 的能力保留给 whisper.cpp / sherpa 后端 |
-| **本地 ASR 引擎** | **faster-whisper**（默认，已实现）；**SenseVoice** / **whisper.cpp** 预留接口未实现 | 借助成熟 C++/CUDA 内核，避免语言重复造轮子 |
-| **前端看板（可选）** | **Vue 3 + Naive UI + Vite** | 作为后期阶段练习，通过 Go `net/http` 暴露 API / SSE 挂载 |
+| `probe <url>` | 枚举来源并检查字幕情况，**不下载** | `--kind single/space/fav/season/search`、`--force`、`--limit` |
+| `download` | 下载可下载的字幕；可选接着转写无字幕视频 | `--lang`、`--format srt,txt,md,json`、`--transcribe`、`--source`、`--asr-lang`、`--model` |
+| `transcribe` | 单独跑本地 ASR（只处理 `no_subtitle` 的行） | `--lang`、`--model`、`--source` |
+| `export` | 把尚未导出的字幕打包成 zip | `--format txt,srt,md,json`、`--include-exported` |
+| `status` | 打印视频状态表 | `--state pending/failed/...` |
+| `retry` | 把 `failed` 重置回 `pending` | — |
+| `reset` | 清空整个数据目录 | `--yes`（必须） |
+| `serve` | 启动网页界面 | `--addr 127.0.0.1:8080` |
+| `login` | 保存登录信息 | `--qr` / `--cookie` / `--sessdata` |
+
+典型的手动流程：
+
+```powershell
+# 1) 列出视频并检查字幕
+.\bili-sub.exe probe "https://space.bilibili.com/123456/video"
+
+# 2) 下载有字幕的；没有的标成 no_subtitle
+.\bili-sub.exe download --format srt,txt
+
+# 3) 给没字幕的做本地转写
+.\bili-sub.exe transcribe --model large-v3-turbo
+
+# 4) 打包
+.\bili-sub.exe export --format txt
+
+# 5) 看看进度
+.\bili-sub.exe status
+```
+
+只处理某个来源（`--source` 用 `probe` 时解析出的来源键）：
+
+| 来源 | 来源键示例 |
+|---|---|
+| UP主 | `123456`（mid） |
+| 收藏夹 | `7890123`（fid） |
+| 合集 | `season:123456:789`（mid:sid） |
+| 搜索 | `search:劳动法` |
+| 单视频 | `BV1xx411c7mD` |
+
+```powershell
+.\bili-sub.exe download --source 123456
+.\bili-sub.exe transcribe --source season:123456:789
+.\bili-sub.exe download --source search:劳动法
+```
+
+### 支持的输入链接
+
+- 单视频：`https://www.bilibili.com/video/BV...`、`av123`、`b23.tv/xxxx`（自动跟随短链）
+- UP主空间：`https://space.bilibili.com/<mid>/video`
+- 收藏夹：`https://space.bilibili.com/<mid>/favlist?fid=<fid>`
+- 合集：`.../channel/collectiondetail?sid=<sid>` 或 `.../lists/<sid>?type=season`
+  - 粘单视频链接时，如果它属于某个合集，会提示合集链接，但**不会**自动整批抓。
+  - 视频选集（series）暂不支持，会明确报错。
+- 搜索：`--kind search "关键词"`（必须登录；一个词最多 1000 条，默认只取 50 条）
+
+> 同一批视频先用 UP主空间抓过、再按合集抓，行的来源键会被改写成合集键；
+> 之后用旧的 `--source <mid>` 会查不到（不报错，返回 0 条）。
 
 ---
 
-## 四、 分阶段实战路线（学习与开发路线）
+## 五、网页界面
 
-### 阶段一：单文件突破——打通 B 站接口与 Go 基础语法
-> **目标**：用 1~2 个 `.go` 脚本，跑通单视频的字幕抓取，熟悉 Go 的基本编程习惯。
+```powershell
+.\bili-sub.exe serve
+# 或双击 start-serve.bat
+```
 
-- [x] **Task 1.1**：用 `net/http` 请求 `https://api.bilibili.com/x/web-interface/view`，获取视频基本信息。
-- [x] **Task 1.2**：实现 **WBI 签名模块**（调用 `/x/web-interface/nav` 拿 key，打乱编码表，计算 MD5 与 `w_rid` 参数）。
-- [x] **Task 1.3**：调用 `x/player/wbi/v2` 拿 `subtitle_url`，解析并转换为本地 `.srt` 文件（处理时间戳格式 `HH:mm:ss,SSS`）。
-- **Go 核心学习点**：
-  - 与 Java Bean 对比：结构体（`struct`）与 JSON Tag（`json:"title"`）。
-  - 与 Java 异常对比：显式错误处理 `if err != nil`、`fmt.Errorf("%w", err)`。
-  - 标准库切片（`slice`）、指针（`pointer`）的基本用法。
+打开 <http://127.0.0.1:8080>，流程：
 
----
+1. **登录 / Cookie**：粘贴 SESSDATA 或整段 Cookie，或点「扫码登录」。
+2. **来源**：粘贴链接（或选「搜索关键词」填词），点「获取视频列表」。
+   - 这一步只翻页拿视频和 cid，不检查字幕，所以很快；列表里先显示「待处理」。
+3. 选字幕语言；需要转写就勾「无字幕时转写」，再选转写语言/模型。
+4. **获取字幕**：逐个检查，有字幕就下载，没字幕标「无字幕」，充电专属标「充电专属」。
+5. **转写无字幕**：当时没勾转写，可以事后单独补跑。
+6. **导出**：网页固定导出 TXT；需要别的格式用命令行 `export --format`。
+7. 进度通过 SSE 实时显示；「清空」等于命令行 `reset --yes`。
 
-### 阶段二：工程化重构与持久化——支持批量枚举与断点续传
-> **目标**：规范 Go 项目目录结构，引入 SQLite 支持断点续传和全量自动翻页。
+关于监听地址：
 
-- [x] **Task 2.1**：建立工程目录（`cmd/`、`internal/bili`、`internal/store`、`internal/config`）。
-- [x] **Task 2.2**：设计 SQLite 数据库表（`videos` 表、`transcripts` 表）。
-  - 计划里写的是 `subtitles` 表；实现改叫 `transcripts`，因为存的是 canonical IR（带时间轴的 JSON），不是纯文本字幕，导出时再从 IR 渲染。
-- [x] **Task 2.3**：实现全量分页循环，批量写入数据库。
-  - 实际分页大小：空间 `ps=30`、收藏夹 `ps=20`（计划里写的 42/36 是拍脑袋值）。合集 `page_size=30` 按 `page.total` **加上**“这一页没带来新视频”双条件收尾（免得依赖服务端对越界页返回空数组），搜索 `page_size=20` 按“空页”收尾（`numPages` 只是声称）。
-- [x] **Task 2.4**：实现幂等检查——重跑时自动跳过已经下载完的视频。
-- **Go 核心学习点**：
-  - `go.mod` 模块依赖管理、包（package）作用域与首字母大小写导出规则。
-  - `database/sql` 接口、连接池配置、预编译语句与事务。
+- 默认只监听 `127.0.0.1:8080`，别的机器访问不到。
+- 这个服务**没有任何鉴权**。确实要用手机/局域网访问时才显式开：
+  `.\bili-sub.exe serve --addr :8080`（风险自负）。
+- 端口被占用就换一个：`--addr 127.0.0.1:8081`；浏览器插件里也要改成同一端口。
 
----
+用脚本直接调 API 时，必须带 JSON 请求头，否则服务会拒绝：
 
-### 阶段三：Go 的王牌——并发池、管道调度与风控限流
-> **目标**：上千级视频的高效抓取，同时保证稳健不封号。
-
-- [x] **Task 3.1**：构建基于 **Channel** 的任务分发队列，启动固定数量（如 3~5 个）Worker Goroutine。
-- [x] **Task 3.2**：集成 `golang.org/x/time/rate` 令牌桶限流器，限制总 QPS（默认 2 req/s）并加入随机抖动。
-  - 抖动是“额外多等 0~200ms”，不是“±200ms”：只会把请求拉开，不会让它变密。
-- [x] **Task 3.3**：拦截 412/429 响应，实现退避休眠（Backoff）与 Cookie 失效报警。
-  - 退避重试 3 次（2s/5s/12s）；`-101` 判定登录失效，整条腿停下来而不是把每个视频标失败。
-- [x] **Task 3.4**：控制台输出友好的统计（成功/无字幕/失败数）。
-  - 命令行是逐条一行 + 末尾汇总，进度条在网页端（SSE）。
-- **Go 核心学习点**：
-  - `go func()` 协程启动、`chan` 阻塞与非阻塞通信。
-  - `select` 多路复用、`context.Context` 优雅超时与退出控制。
-  - `sync.WaitGroup` 任务同步等待。
+```powershell
+curl.exe -X POST http://127.0.0.1:8080/api/probe `
+  -H "Content-Type: application/json" `
+  -d "{\"url\":\"https://www.bilibili.com/video/BV1xx411c7mD\"}"
+```
 
 ---
 
-### 阶段四：跨语言串联——音频抽取与本地 Whisper 自动转写
-> **目标**：当视频检测为「无官方字幕」时，自动走本地模型离线兜底流水线。
+## 六、浏览器插件（可选）
 
-- [x] **Task 4.1**：从 B 站 playurl 接口获取 dash 音频流（`fnval=16` + WBI 签名）并下载。
-- [x] **Task 4.2**：下载 `playurl` 的 dash 音频（`data/audio/<bvid>-<cid>.m4s`），**直接**喂给 worker，不经过 ffmpeg。
-- [x] **Task 4.3**：编写独立的 ASR 常驻脚本/命令（Python `faster-whisper`，`scripts/transcribe_worker.py`），Go 负责调度。
-- [x] **Task 4.4**：转写完成后保存 `.srt`，**立刻删除庞大的临时音频文件**，释放磁盘空间。
-- **Go 核心学习点**：
-  - `os/exec.Command` 子进程生命周期管理、标准输入输出管道捕获。
-  - 临时文件安全管理与磁盘 I/O。
+`browser-extension/` 里有一个轻量插件：在 B 站页面点一下，就把当前登录 Cookie 和链接发给本机
+`bili-sub serve`，省去手动复制。
 
----
+- 先启动 `.\bili-sub.exe serve`，并保持端口 8080（或在插件弹窗里改）。
+- 火狐：`about:debugging#/runtime/this-firefox` → 临时载入 → 选 `browser-extension/manifest.json`。
+- Chrome/Edge：先把 `manifest.chrome.json` 复制成 `manifest.json`，再到 `chrome://extensions`
+  打开开发者模式 → 加载已解压的扩展程序 → 选择 `browser-extension` 目录。
 
-### 阶段五（加分项）：Web 看板与 CLI 打包
-> **目标**：为项目锦上添花，感受 Go 托管静态前端的便利。
-
-- [x] **Task 5.1**：用 Cobra 封装命令：`bili-sub run <url>`、`bili-sub status`、`bili-sub retry`。
-- [x] **Task 5.2**：Go 标准库启动简易 HTTP 服务，暴露任务列表与统计接口。
-  - `bili-sub serve`：登录 / 探测 / 下载 / 导出 / SSE 进度 / 任务列表，内嵌页面。
-  - 默认只监听 **`127.0.0.1:8080`**：这个服务**没有任何鉴权**，所以才把“全网卡可达”留给用户显式选（`--addr :8080`，局域网/手机能访问）。写脚本调 API 时必须带 `-H 'Content-Type: application/json'`（服务只收 JSON 体，这是阻止“随便一个网页往本机 POST”的关）。
-- [x] **Task 5.3**：（可选）极简看板，由 Go 的 `embed.FS` 嵌入打包成单个独立 `.exe`。
-  - 实际用的是原生 HTML/CSS/JS，没上 Vue：页面只有一张表加几个控件，引入构建链收益不大。`embed.FS` 单文件打包已实现。
+详细说明见 [browser-extension/README.md](browser-extension/README.md)。
 
 ---
 
-## 五、 重点避坑与安全底线
+## 七、配置项
 
-1. **B 站防爬风控（最容易翻车）**：
-   - 抓上千视频必须**严控并发与频次**（推荐 1~3 并发，单请求间隔 1~3 秒）。
-   - 请求头带正规 `User-Agent` 与 `Referer: https://www.bilibili.com`。
-   - `SESSDATA` 严禁提交至 Git 仓库，统一走本地 `.env` 或配置文件加载。
-2. **磁盘空间与生命周期**：
-   - 1000 个视频如果全部留存音频，会吃掉上百 GB 空间。
-   - 策略必须是：**下载音频 -> 转写成功落盘 srt -> 校验文件存在 -> 立即删除音频**（成功失败都删，`data/audio/` 不积压）。
-3. **Whisper 算力评估**：
-   - 自动优先 CUDA（`cuda/float16`），CUDA 库缺失时自动降级 `cpu/int8`；CPU 下可用 `small` + int8 顶住。
-   - 务必开启 VAD（语音活动检测），防止背景空白产生大段重复幻觉。
+`.env` 里的键（也可以直接用同名环境变量覆盖 `.env`）：
+
+| 键 | 默认值 | 说明 |
+|---|---|---|
+| `SESSDATA` | 空 | 登录 Cookie；一般用 `login` 命令写 `data/session.json` 就够了 |
+| `BILI_DATA_DIR` | `data` | 数据目录（数据库、字幕、导出、临时音频都在里面） |
+| `BILI_QPS` | `2` | 全局请求速率上限（令牌桶）。调高会快，也更容易 412 |
+| `BILI_CONCURRENCY` | `3` | 并发任务数 |
+| `PYTHON_PATH` | `python` | ASR 用的 Python 解释器；建议指向 `.asr-venv\Scripts\python.exe` |
+| `ASR_MODEL` | 空（worker 默认 `small`） | 转写模型；命令行 `--model` 优先级更高 |
+| `ASR_SIMPLIFY` | `true` | 繁转简；确实要繁体原文时设 `0` |
+| `FFMPEG_PATH` | `ffmpeg` | 预留项，当前链路不需要 ffmpeg |
+
+补充：
+
+- 写了未知键会**直接报错**，不会静默忽略（防止拼错键名后「配置像没生效」）。
+- `ASR_BATCH_SIZE`（默认 8）是 worker 的批大小，**必须在 shell 环境里设**，`.env` 里的键不会传给 Python 子进程：
+  ```powershell
+  $env:ASR_BATCH_SIZE=4
+  .\bili-sub.exe transcribe
+  ```
+- `.env` 默认从当前工作目录读；用 `--env D:\path\to\my.env` 可以换一份。
 
 ---
 
-## 六、 仓库规划目录结构
+## 八、输出文件与状态
+
+运行后数据目录结构（默认 `data/`）：
+
+```
+data/
+├── bili_sub.db          # SQLite：视频、字幕 IR、状态
+├── session.json         # 登录 Cookie
+├── audio/               # 临时 .m4s，转写完立即删（超过 30 分钟的残留会自动清）
+├── subtitles/           # 下载/转写的字幕，文件名：UP主 - 标题 [BV号].srt
+└── exports/             # 导出的 zip：<日期>-<文件数>.zip，里面按同一命名放各格式
+```
+
+- 下载默认落 `.srt`，`--format srt,txt,md,json` 可同时输出多份。
+- 导出默认只打包**尚未导出**的字幕；要重复导出加 `--include-exported`。
+- 多 P 视频的文件名会带 `_P{n}`，不会互相覆盖。
+- 断点续传：已完成的行不会重复下载；`--force`（`probe`/`run`）或 `reset` 才会重来。
+- 失败行用 `status --state failed` 查看，`retry` 重置后重跑。
+
+---
+
+## 九、常见问题
+
+### 1. 挪动项目目录后，转写不能用了
+
+几乎都是 `.env` 里的 `PYTHON_PATH` 还指向旧路径。症状：
+
+```
+asr: 找不到 Python 解释器 "C:\旧路径\...\python.exe" ...
+```
+
+改成新路径（或相对路径 `.asr-venv\Scripts\python.exe`），然后验证：
+
+```powershell
+.\.asr-venv\Scripts\python.exe -c "import faster_whisper"
+.\bili-sub.exe transcribe --model tiny   # 用最小模型冒烟（需要先有 no_subtitle 的行）
+```
+
+其他路径类报错：
+
+| 报错 | 原因 / 处理 |
+|---|---|
+| `找不到 worker 脚本 scripts/transcribe_worker.py` | 不在仓库根目录启动了；`cd` 回根目录或用 `start-serve.bat` |
+| `无法 import faster_whisper` | `PYTHON_PATH` 指到了系统 Python，或没装依赖；用 `.asr-venv` 里的解释器重装 |
+| `open() got an unexpected keyword argument 'metadata_errors'` | `av` 版本太新；重装 `faster-whisper "av<19"` |
+| `No module named 'ctranslate2'` | 依赖装了一半；在 venv 里重跑安装命令 |
+
+### 2. 转写很慢 / 没用上 GPU
+
+启动时看 stderr：`[worker] large-v3-turbo on cuda/float16` 才是 GPU。
+
+- 显示 `cpu/int8`：没装 CUDA 运行库，装 `nvidia-cublas-cu12 nvidia-cudnn-cu12`。
+- 显存爆了：把 `ASR_BATCH_SIZE` 调到 4 或 2（必须在 shell 里设）。
+- 降级逻辑只在 GPU **从未成功过**时生效；之前成功过、这次失败，会把它当文件问题，不会偷偷整批降速。
+
+模型选择（RTX 4060 Laptop，同一段 268 秒中文音频）：
+
+| 模型 | GPU float16 | 说明 |
+|---|---|---|
+| `tiny` | 12 秒 | 质量差，只适合冒烟测试 |
+| `small` | 23 秒 | CPU 上的默认选择（int8 约 8 分钟） |
+| `large-v3-turbo` | 25 秒 | **有 GPU 就选它**，比 small 只慢 2 秒，准确率明显更高 |
+
+### 3. 被风控（HTTP 412 / 429）
+
+- 把 `BILI_QPS` / `BILI_CONCURRENCY` 调回 2 / 3，等十几分钟再试。
+- 用整段 Cookie 重新登录（`login --cookie`），只给 SESSDATA 更容易触发。
+- 不要同时开多个终端跑下载/探测。
+
+### 4. 提示登录失效（`-101 账号未登录`）
+
+重新 `login`。下载音频、搜索都必须是登录态。
+
+### 5. 整批停下，提示没有匹配的字幕语言
+
+比如 `--lang ja` 但整批视频只有中文轨道。换成 `--lang zh`（或 `zh-Hans`）重跑；
+`zh-Hans` 不会匹配 `zh-Hant`。
+
+### 6. 网页打不开 / 端口冲突
+
+- 确认 `serve` 进程还在，地址是 `http://127.0.0.1:8080`。
+- 换端口：`serve --addr 127.0.0.1:8081`；插件弹窗里的端口也要同步改。
+- 局域网访问必须显式 `--addr :8080`，并且服务**没有鉴权**。
+
+### 7. 导出是空的
+
+默认只导出「尚未导出」的视频。如果之前打包过，加 `--include-exported`。
+另外，只有状态为 `fetched` / `transcribed` / `exported` 且 IR 完好的行才会进包。
+
+### 8. Ctrl+C 之后有残留
+
+- 正常 Ctrl+C 会取消任务、清理在途音频，不标失败；按第二次才强制退出。
+- 被强杀留下的旧音频，`transcribe` 每次启动会清掉 30 分钟以上的文件。
+
+---
+
+## 十、Python 版
+
+同仓库的 `python/` 下有一份完整 Python 实现：CLI + Web + 进程内 faster-whisper，和 Go 版共用同一套 `.env`、`data/`、SQLite 表结构和 Web API。
+
+```powershell
+cd python
+uv venv --python 3.12 .venv
+uv pip install --python .venv\Scripts\python.exe -e ".[asr,dev]"
+.venv\Scripts\bili-sub-py.exe status
+```
+
+安装、命令和差异说明见 [python/README.md](python/README.md)。
+
+> 两个版本不要同时对同一个 `data/` 目录写；切换前先停掉另一个。
+
+---
+
+## 十一、目录结构
 
 ```
 BiliBili/
-├── README.md                  # 本实施计划
-├── go.mod                     # Go 模块定义
-├── go.sum
-├── cmd/
-│   └── bili-sub/              # 命令行入口 main.go
-│       └── main.go
+├── README.md                  # 本文件：部署与使用
+├── docs/DESIGN.md             # 架构、设计取舍、Go 学习路线
+├── go.mod / go.sum
+├── bili-sub.exe               # 编译产物（gitignore）
+├── start-serve.bat            # 双击启动网页界面
+├── .env                       # 本地配置（gitignore）
+├── .asr-venv/                 # 本地 ASR 的 Python 环境（gitignore）
+├── cmd/bili-sub/main.go       # 入口
 ├── internal/
-│   ├── bili/                  # B站客户端、WBI签名、API结构体
-│   │   ├── client.go
-│   │   ├── wbi.go
-│   │   └── types.go
-│   ├── store/                 # SQLite 读写与状态机
-│   │   └── db.go
-│   ├── pipeline/              # 枚举 / 探测 / 字幕+音频下载 / 并发池
-│   │   ├── audio.go           # playurl -> dash .m4s
-│   │   ├── download.go        # 字幕 -> IR + .srt
-│   │   ├── enumerate.go
-│   │   ├── probe.go
-│   │   └── pool.go
-│   ├── cli/                   # 命令实现与编排 (probe/download/transcribe/export)
-│   ├── asr/                   # ASR 调度 (调用本地模型/脚本)
-│   │   └── asr.go
-│   └── util/                  # 文件名清洗、时间转换等工具
-│       └── sanitize.go
-├── scripts/                   # Python 辅助脚本 (faster-whisper worker)
-│   ├── transcribe_worker.py
+│   ├── bili/                  # 客户端、WBI 签名、登录、限流
+│   ├── store/                 # SQLite 与状态机
+│   ├── pipeline/              # 枚举、探测、字幕/音频下载、并发池
+│   ├── asr/                   # ASR 调度、worker 协议、输出清洗
+│   ├── export/                # IR → srt/txt/md/json + zip 打包
+│   ├── server/                # HTTP API、SSE、内嵌网页
+│   ├── config/                # .env 解析
+│   ├── ir/                    # Canonical IR
+│   └── filename/              # 文件名清洗
+├── scripts/
+│   ├── transcribe_worker.py   # faster-whisper 常驻 worker（Go 版用）
 │   └── test_transcribe_worker.py
-└── data/                      # 默认运行产物目录 (被 .gitignore 忽略)
-    ├── bili_sub.db            # SQLite 数据库
-    ├── audio/                 # 临时 dash 音频（转写完立即删除）
-    └── subtitles/             # 输出字幕目录
+├── python/                    # Python 完整实现（CLI + Web + 进程内 ASR）
+├── browser-extension/         # 浏览器插件（可选）
+└── data/                      # 运行产物（gitignore）
 ```
+
+---
+
+## 说明
+
+- 本项目只抓取你有权限访问的字幕/音频，请在遵守 B 站用户协议与版权规定的前提下使用。
+- `.env`、`data/`、`.asr-venv/`、`*.exe` 都不进 Git；分享代码前不用手动清理。

@@ -385,7 +385,6 @@ func TestServeProbeSeamCarriesTheSeasonHint(t *testing.T) {
 	}))
 	defer srv.Close()
 	overrideEnumerator(t, srv.URL+"/x/web-interface/view", srv.URL+"/x/web-interface/nav")
-	overrideProber(t, srv.URL+"/x/player/v2")
 
 	rt := newTestRuntime(t)
 	defer rt.close()

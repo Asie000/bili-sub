@@ -135,12 +135,15 @@ func (r *runtime) serve(ctx context.Context, out io.Writer, addr string) error {
 
 // serveOptions builds the server's seams. They reuse the CLI helpers, so the
 // browser runs exactly the same pipeline as `bilibili-sub probe|download|export`.
-// The three long-running seams share r.opMu and report errOperationBusy instead
+// The four long-running seams share r.opMu and report errOperationBusy instead
 // of running alongside each other.
 func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options {
 	return server.Options{
 		Store: st,
 		Hub:   hub,
+		// b23.tv short links are expanded here, before the handler parses the
+		// source, so the browser and the CLI resolve them the same way.
+		ResolveURL: r.resolveInputURL,
 		Probe: func(ctx context.Context, rawURL, kind string, force bool, onProgress func(server.Progress)) (server.ProbeSummary, error) {
 			if !r.opMu.TryLock() {
 				return server.ProbeSummary{}, errOperationBusy
@@ -187,10 +190,30 @@ func (r *runtime) serveOptions(st *store.Store, hub *server.Hub) server.Options 
 			// decides whether that is a partial success or a real failure.
 			return server.DownloadSummary{
 				Fetched:          stats.Fetched,
+				NoSubtitle:       stats.NoSubtitle,
+				ChargingLocked:   stats.ChargingLocked,
 				Failed:           stats.Failed,
 				Transcribed:      stats.Transcribed,
 				TranscribeFailed: stats.TranscribeFailed,
 				Error:            stats.FirstError,
+			}, err
+		},
+		Transcribe: func(ctx context.Context, asrLang, model, source string, onProgress func(server.Progress)) (server.TranscribeSummary, error) {
+			if !r.opMu.TryLock() {
+				return server.TranscribeSummary{}, errOperationBusy
+			}
+			defer r.opMu.Unlock()
+			var progress func(done, total int)
+			if onProgress != nil {
+				progress = func(done, total int) {
+					onProgress(server.Progress{Op: "transcribe", Done: done, Total: total})
+				}
+			}
+			stats, err := r.transcribe(ctx, io.Discard, asrLang, model, source, progress)
+			return server.TranscribeSummary{
+				Total:       stats.Total,
+				Transcribed: stats.OK,
+				Failed:      stats.Failed,
 			}, err
 		},
 		Export: func(ctx context.Context, formats []string, includeExported bool, onProgress func(server.Progress)) (string, error) {

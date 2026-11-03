@@ -67,6 +67,18 @@ class SelectiveModel:
         return iter([FakeSegment(0.0, 1.0, "ok")]), object()
 
 
+class FakePipeline:
+    """Stands in for faster-whisper's BatchedInferencePipeline. It forwards to the
+    stubbed model so the protocol and CUDA-fallback tests stay about the worker's
+    own behaviour, not about whether a real faster-whisper is installed."""
+
+    def __init__(self, model):
+        self.model = model
+
+    def transcribe(self, audio, language=None, vad_filter=False, batch_size=None):
+        return self.model.transcribe(audio, language=language, vad_filter=vad_filter)
+
+
 def run_worker(module, requests):
     """Feed request dicts through module.main() and return the parsed replies."""
     payload = "".join(json.dumps(req) + "\n" for req in requests)
@@ -92,6 +104,7 @@ class WorkerProtocolTest(unittest.TestCase):
     def setUp(self):
         self.worker = load_worker()
         reset_model_cache(self.worker)
+        self.worker.build_pipeline = lambda model: FakePipeline(model)
 
     def test_response_carries_exactly_the_keys_the_go_side_decodes(self):
         self.worker.build_model = lambda name, device: WorkingModel()
@@ -174,6 +187,7 @@ class ModelCacheTest(unittest.TestCase):
     def setUp(self):
         self.worker = load_worker()
         reset_model_cache(self.worker)
+        self.worker.build_pipeline = lambda model: FakePipeline(model)
 
     def test_repeated_requests_build_the_model_once(self):
         builds = []
@@ -282,6 +296,48 @@ class StdioEncodingTest(unittest.TestCase):
             legacy.flush()
         finally:
             sys.stderr = real
+
+
+class BatchTest(unittest.TestCase):
+    """The batched pipeline is the speed-up. Pin that it is used, with the
+    configured batch size, and that a missing one degrades to the plain model
+    instead of failing."""
+
+    def setUp(self):
+        self.worker = load_worker()
+        reset_model_cache(self.worker)
+        self.worker.build_model = lambda name, device: WorkingModel()
+
+    def test_transcribe_delegates_to_the_pipeline_with_the_configured_batch_size(self):
+        seen = {}
+
+        class SpyPipeline:
+            def __init__(self, model):
+                seen["model"] = model
+
+            def transcribe(self, audio, language=None, vad_filter=False, batch_size=None):
+                seen["batch_size"] = batch_size
+                seen["vad_filter"] = vad_filter
+                return iter([FakeSegment(0.0, 1.0, "hi")]), object()
+
+        self.worker.build_pipeline = lambda model: SpyPipeline(model)
+
+        replies = run_worker(self.worker, [{"audio": "a.m4s", "lang": "zh"}])
+
+        self.assertEqual(replies[0]["error"], "")
+        self.assertEqual(seen["batch_size"], self.worker.BATCH_SIZE)
+        self.assertTrue(seen["vad_filter"])
+
+    def test_direct_pipeline_forwards_to_the_model(self):
+        """The fallback for a faster-whisper without BatchedInferencePipeline
+        must still transcribe, ignoring the batch_size argument it cannot use."""
+        pipeline = self.worker._DirectPipeline(WorkingModel("hi"))
+
+        segments, _info = pipeline.transcribe(
+            "a.m4s", language="zh", vad_filter=True, batch_size=8
+        )
+
+        self.assertEqual([s.text for s in segments], [" hi "])
 
 
 def reset_model_cache(module):

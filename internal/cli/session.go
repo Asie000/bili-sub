@@ -18,6 +18,13 @@ func sessionExpired(err error) bool {
 	return errors.As(err, &apiErr) && apiErr.SessionExpired()
 }
 
+// riskControl reports whether err is bilibili's HTTP 412/429 risk-control block.
+// Like an expired session it is about the session rather than one video: every
+// later request is likely blocked the same way, so the whole leg stops and warns.
+func riskControl(err error) bool {
+	return errors.Is(err, bili.ErrRiskControl)
+}
+
 // legAbort lets the first worker that sees a whole-leg failure cancel the rest
 // of a run and remember the error for the caller. fatal decides which errors are
 // whole-leg (an expired session, an unsupported language); workers run

@@ -34,6 +34,10 @@ type fakeASR struct {
 	// cancel, when set, is called during Transcribe so a test can cancel the run
 	// in the middle of a video.
 	cancel context.CancelFunc
+	// onFirst, when set, is called during the first Transcribe call. A test uses
+	// it to assert what else the pipeline is doing at that moment -- specifically
+	// that the next video's audio is already being downloaded.
+	onFirst func()
 
 	mu       sync.Mutex
 	gotPaths []string
@@ -55,7 +59,12 @@ func (f *fakeASR) Transcribe(_ context.Context, audioPath string, opts asr.Optio
 	f.gotPaths = append(f.gotPaths, audioPath)
 	f.gotOpts = append(f.gotOpts, opts)
 	cancel, err, segments := f.cancel, f.err, f.segments
+	first := len(f.gotPaths) == 1
+	onFirst := f.onFirst
 	f.mu.Unlock()
+	if first && onFirst != nil {
+		onFirst()
+	}
 	if cancel != nil {
 		cancel()
 	}
@@ -843,6 +852,65 @@ func TestTranscribeCleansTheBackendOutput(t *testing.T) {
 	}
 	if !strings.Contains(got, "谢谢大家") {
 		t.Errorf("srt lost the line after the repeat:\n%s", got)
+	}
+}
+
+// TestTranscribeDownloadsAheadOfTheBackend pins the overlap between the two
+// halves of the leg: the audio for a video is fetched while the previous one is
+// still being transcribed. The backend blocks on the first video until the
+// second video's playurl request has been made, so the run only completes if
+// video 2's download was already in flight while video 1 was on the GPU. A
+// serial implementation would fetch video 2 only after the transcription
+// returned, and the guard below would time out.
+func TestTranscribeDownloadsAheadOfTheBackend(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BILI_DATA_DIR", dir)
+	seedVideoRow(t, dir, store.Video{Bvid: "BV1one", Cid: 11, Author: "UP", Title: "一", State: store.StateNoSubtitle})
+	seedVideoRow(t, dir, store.Video{Bvid: "BV1two", Cid: 22, Author: "UP", Title: "二", State: store.StateNoSubtitle})
+
+	secondFetch := make(chan struct{})
+	var mu sync.Mutex
+	playurls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/x/frontend/finger/spi":
+			_, _ = io.WriteString(w, `{"code":0,"message":"0","data":{"b_3":"B3","b_4":"B4"}}`)
+		case "/x/web-interface/nav":
+			_, _ = io.WriteString(w, fakeNavBody)
+		case "/x/player/wbi/playurl":
+			mu.Lock()
+			playurls++
+			n := playurls
+			mu.Unlock()
+			if n == 2 {
+				close(secondFetch)
+			}
+			fmt.Fprintf(w, `{"code":0,"message":"0","data":{"dash":{"audio":[{"baseUrl":"http://%s/audio/a.m4s","bandwidth":30216}],"duration":60}}}`, r.Host)
+		case "/audio/a.m4s":
+			_, _ = io.WriteString(w, "fake-audio-bytes")
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	overrideAudioPipeline(t, srv.URL)
+
+	backend := &fakeASR{segments: []ir.Segment{{StartMs: 0, EndMs: 100, Text: "内容"}}}
+	backend.onFirst = func() {
+		select {
+		case <-secondFetch:
+		case <-time.After(5 * time.Second):
+			t.Error("the second video's audio was not fetched while the first was being transcribed")
+		}
+	}
+	overrideASRBackend(t, backend, nil)
+
+	if out, err := executeOut(t, "transcribe"); err != nil {
+		t.Fatalf("transcribe: %v\n%s", err, out)
+	}
+	if got := len(backend.paths()); got != 2 {
+		t.Errorf("backend calls = %d, want both videos transcribed", got)
 	}
 }
 

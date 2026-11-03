@@ -36,6 +36,24 @@ import sys
 
 DEFAULT_MODEL = "small"
 
+# BATCH_SIZE is how many 30s windows the batched pipeline decodes at once. With
+# one window at a time the GPU sat around 40% busy; this is the knob that makes
+# it worthwhile. 8 is faster-whisper's own default and fits an 8GB card with the
+# large-v3-turbo weights (~1.6GB) loaded.
+#
+# ASR_BATCH_SIZE overrides it for a machine that runs out of VRAM at 8; it is a
+# real environment variable rather than a .env key because the Go side launches
+# this script as a child process, which inherits the shell's environment.
+def _batch_size():
+    try:
+        n = int(os.environ.get("ASR_BATCH_SIZE", ""))
+    except ValueError:
+        return 8
+    return n if n > 0 else 8
+
+
+BATCH_SIZE = _batch_size()
+
 
 def register_cuda_dlls():
     """Make pip-installed CUDA runtime DLLs (nvidia-*-cu12) findable.
@@ -133,9 +151,17 @@ def load_model(name, device=None):
 def transcribe_segments(model, audio, lang):
     """Decode audio and return plain segment dicts. transcribe() returns a
     generator, so this loop is where ctranslate2 actually runs the model --
-    and therefore where a broken CUDA install surfaces."""
+    and therefore where a broken CUDA install surfaces.
+
+    The batched pipeline decodes several 30s windows at once instead of one,
+    which is the difference between a GPU that sits near idle and one that is
+    actually used. It is built per call because wrapping an already-loaded model
+    is just a reference copy; there is no model to reload here.
+    """
     # vad_filter drops leading/trailing silence so segment timestamps stay tight.
-    segments, _info = model.transcribe(audio, language=lang, vad_filter=True)
+    segments, _info = build_pipeline(model).transcribe(
+        audio, language=lang, vad_filter=True, batch_size=BATCH_SIZE
+    )
     return [
         {
             "start_ms": int(round(seg.start * 1000)),
@@ -144,6 +170,27 @@ def transcribe_segments(model, audio, lang):
         }
         for seg in segments
     ]
+
+
+class _DirectPipeline:
+    """Pass-through used when the installed faster-whisper predates
+    BatchedInferencePipeline: it keeps the one-window-at-a-time behaviour rather
+    than failing, so batching is a speed-up and never a hard requirement."""
+
+    def __init__(self, model):
+        self.model = model
+
+    def transcribe(self, audio, language=None, vad_filter=False, batch_size=None):
+        return self.model.transcribe(audio, language=language, vad_filter=vad_filter)
+
+
+def build_pipeline(model):
+    """Wrap a loaded model in faster-whisper's batched pipeline."""
+    try:
+        from faster_whisper import BatchedInferencePipeline
+    except ImportError:
+        return _DirectPipeline(model)
+    return BatchedInferencePipeline(model=model)
 
 
 class EngineError(RuntimeError):

@@ -340,6 +340,41 @@ func TestProbeEndpointResponseCarriesSourceAndKind(t *testing.T) {
 	}
 }
 
+// TestProbeResolvesShortLinkBeforeParsing pins that a b23.tv link is expanded
+// before parsing, so both the probe seam and the returned source/kind describe
+// the real URL rather than the short one.
+func TestProbeResolvesShortLinkBeforeParsing(t *testing.T) {
+	var gotURL string
+	s := newTestServer(t, Options{
+		ResolveURL: func(_ context.Context, _ string) (string, error) {
+			return "https://space.bilibili.com/12345", nil
+		},
+		Probe: func(_ context.Context, url, _ string, _ bool, _ func(Progress)) (ProbeSummary, error) {
+			gotURL = url
+			return ProbeSummary{Probed: 1}, nil
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/probe", `{"url":"https://b23.tv/aBcDeF"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if gotURL != "https://space.bilibili.com/12345" {
+		t.Fatalf("seam got url %q, want the resolved URL", gotURL)
+	}
+	var got struct {
+		ProbeSummary
+		Source string `json:"source"`
+		Kind   string `json:"kind"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if got.Source != "12345" || got.Kind != "space" {
+		t.Fatalf("response = %+v, want source=12345 kind=space", got)
+	}
+}
+
 // TestProbeEndpointExplicitKindOverridesAutoDetection pins the type selector:
 // a bare numeric id is ambiguous, so an explicit fav kind must resolve it even
 // though ParseURL alone would reject it.
@@ -478,6 +513,58 @@ drain:
 	}
 	if progress[1] != (Progress{Op: "download", Done: 2, Total: 2}) {
 		t.Fatalf("last tick = %+v, want the final tick download 2/2", progress[1])
+	}
+}
+
+// TestTranscribeEndpointPassesInputs pins POST /api/transcribe: the seam gets
+// the page's asr_lang/model/source, and the counts come back as JSON.
+func TestTranscribeEndpointPassesInputs(t *testing.T) {
+	var gotLang, gotModel, gotSource string
+	s := newTestServer(t, Options{
+		Transcribe: func(_ context.Context, asrLang, model, source string, onProgress func(Progress)) (TranscribeSummary, error) {
+			gotLang, gotModel, gotSource = asrLang, model, source
+			onProgress(Progress{Op: "transcribe", Done: 1, Total: 1})
+			return TranscribeSummary{Total: 1, Transcribed: 1}, nil
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/transcribe", `{"asr_lang":"en","model":"small","source":"12345"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if gotLang != "en" || gotModel != "small" || gotSource != "12345" {
+		t.Fatalf("seam got lang=%q model=%q source=%q, want en/small/12345", gotLang, gotModel, gotSource)
+	}
+	var summary TranscribeSummary
+	if err := json.Unmarshal(rec.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if summary.Transcribed != 1 || summary.Failed != 0 {
+		t.Fatalf("summary = %+v, want 1 transcribed", summary)
+	}
+}
+
+// TestTranscribeEndpointKeepsCountsOnPartWayError pins that a run which
+// transcribed some videos and then failed (an expired session, a dead engine)
+// answers 200 with the counts and the reason rather than a bare 500 that would
+// hide the work already done.
+func TestTranscribeEndpointKeepsCountsOnPartWayError(t *testing.T) {
+	s := newTestServer(t, Options{
+		Transcribe: func(_ context.Context, _, _, _ string, _ func(Progress)) (TranscribeSummary, error) {
+			return TranscribeSummary{Total: 3, Transcribed: 1}, errors.New("登录态失效")
+		},
+	})
+
+	rec := serve(t, s, http.MethodPost, "/api/transcribe", `{}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var summary TranscribeSummary
+	if err := json.Unmarshal(rec.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if summary.Transcribed != 1 || summary.Error == "" {
+		t.Fatalf("summary = %+v, want the count kept and the reason attached", summary)
 	}
 }
 
@@ -896,25 +983,20 @@ func TestServerWithNilHubBroadcastsSafely(t *testing.T) {
 	}
 }
 
-// TestEmbeddedUIExposesExportFormats pins MINOR 6: the page must offer every
-// export format and app.js must post the checked subset rather than a
-// hardcoded list.
-func TestEmbeddedUIExposesExportFormats(t *testing.T) {
+// TestEmbeddedUIFixesExportToTxt pins the product decision that the page's
+// export is a plain-text reading copy: the format is fixed to txt rather than
+// chosen from checkboxes. The server API still accepts other formats.
+func TestEmbeddedUIFixesExportToTxt(t *testing.T) {
 	s := newTestServer(t, Options{})
 
 	index := serve(t, s, http.MethodGet, "/", "").Body.String()
 	app := serve(t, s, http.MethodGet, "/app.js", "").Body.String()
 
-	if !strings.Contains(app, "export-format") {
-		t.Error("app.js does not read the export-format checkboxes")
+	if !strings.Contains(app, `return ["txt"]`) {
+		t.Error("app.js should fix the export format to txt")
 	}
-	if strings.Contains(app, `["srt"]`) {
-		t.Error("app.js still hardcodes the srt-only export list")
-	}
-	for _, format := range []string{"srt", "txt", "json", "md"} {
-		if !strings.Contains(index, `value="`+format+`"`) {
-			t.Errorf("index.html offers no %q export checkbox", format)
-		}
+	if strings.Contains(index, "export-format") {
+		t.Error("index.html should no longer offer export format checkboxes")
 	}
 }
 

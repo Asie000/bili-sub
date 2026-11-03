@@ -12,7 +12,9 @@ import (
 type SourceKind int
 
 const (
-	// KindSingle is a single video, identified by its bvid.
+	// KindSingle is a single video, identified by its BV号 ("BV...") or its
+	// legacy av号 ("av<digits>"). The store keys rows by the resolved bvid, so
+	// the av form is only an input spelling.
 	KindSingle SourceKind = iota
 	// KindSpace is an UP主's video list, identified by mid.
 	KindSpace
@@ -110,6 +112,11 @@ func NormalizeSourceKey(key string) string {
 
 var (
 	reBvid = regexp.MustCompile(`BV[0-9A-Za-z]{10}`)
+	// av号 is the pre-BV spelling. The plugin this project mirrors accepts it, and
+	// the view API takes an aid directly, so both the /video/av<digits> link and a
+	// bare "av<digits>" are accepted (the bare form parallels a bare bvid).
+	reAvidURL  = regexp.MustCompile(`(?i)bilibili\.com/video/av(\d+)`)
+	reAvidBare = regexp.MustCompile(`(?i)^av(\d+)$`)
 	// Search links carry the keyword, so they must be tested before the bvid
 	// pattern: a link whose keyword happens to be a bvid is a search, not a video.
 	reSearchURL = regexp.MustCompile(`search\.bilibili\.com/[^ ]*[?&]keyword=([^&#]+)`)
@@ -174,6 +181,12 @@ func ParseURL(raw string) (SourceKind, string, error) {
 	}
 	if m := reBvid.FindString(s); m != "" {
 		return KindSingle, m, nil
+	}
+	if m := reAvidURL.FindStringSubmatch(s); m != nil {
+		return KindSingle, "av" + m[1], nil
+	}
+	if m := reAvidBare.FindStringSubmatch(s); m != nil {
+		return KindSingle, "av" + m[1], nil
 	}
 	return 0, "", fmt.Errorf("unrecognized bilibili url or id: %q", raw)
 }
@@ -257,7 +270,13 @@ func ParseURLForKind(raw string, kind SourceKind) (string, error) {
 		if m := reBvid.FindString(s); m != "" {
 			return m, nil
 		}
-		return "", fmt.Errorf("无法从 %q 解析视频号（BV号）", raw)
+		if m := reAvidURL.FindStringSubmatch(s); m != nil {
+			return "av" + m[1], nil
+		}
+		if m := reAvidBare.FindStringSubmatch(s); m != nil {
+			return "av" + m[1], nil
+		}
+		return "", fmt.Errorf("无法从 %q 解析视频号（BV号或av号）", raw)
 	case KindSpace:
 		if m := reSpaceMid.FindStringSubmatch(s); m != nil {
 			return m[1], nil

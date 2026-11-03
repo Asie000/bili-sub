@@ -72,7 +72,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().Bool("transcribe", true, "对无字幕视频启用本地 ASR 转写（--transcribe=false 跳过）")
 	cmd.Flags().String("asr-lang", defaultASRLang, "转写语言：zh 或 en（空则自动检测）")
 	cmd.Flags().String("model", "", "Whisper 模型名（默认取 .env 的 ASR_MODEL）")
-	cmd.Flags().String("format", "srt,txt,json,md", "导出格式，逗号分隔：srt,txt,md,json")
+	cmd.Flags().String("format", "txt", "导出格式，逗号分隔：txt,srt,md,json（默认只导出 txt）")
 	cmd.Flags().Bool("force", false, "重新探测已完成（fetched/transcribed/exported）的视频")
 	cmd.Flags().Int("limit", pipeline.DefaultSearchLimit, "搜索来源最多取多少条（0 = 不限）；其他来源忽略此项")
 	return cmd
@@ -89,7 +89,13 @@ func newRunCmd() *cobra.Command {
 func (r *runtime) run(ctx context.Context, out io.Writer, rawURL, kindSpec, lang, asrLang, model string, transcribe bool, formats []string, force bool, limit int, onProgress func(done, total int)) error {
 	// Resolve the source first: a bad link must fail before anything is written,
 	// and the download leg has to be scoped to it. This mirrors what the HTTP
-	// probe handler does for the same reason.
+	// probe handler does for the same reason. A b23.tv share link is expanded to
+	// its real URL first, since only that reveals the source.
+	resolved, err := r.resolveInputURL(ctx, rawURL)
+	if err != nil {
+		return err
+	}
+	rawURL = resolved
 	var source string
 	if explicit, ok := pipeline.ParseSourceKind(kindSpec); ok {
 		s, err := pipeline.ParseURLForKind(rawURL, explicit)

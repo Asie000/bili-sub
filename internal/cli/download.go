@@ -80,6 +80,8 @@ func newDownloadCmd() *cobra.Command {
 type downloadStats struct {
 	Total            int
 	Fetched          int
+	NoSubtitle       int
+	ChargingLocked   int
 	Failed           int
 	Transcribed      int
 	TranscribeFailed int
@@ -146,10 +148,11 @@ func (r *runtime) download(ctx context.Context, out io.Writer, lang string, form
 }
 
 // downloadFatal reports the failures that would repeat for every remaining
-// video -- an expired session, or a --lang that matches none of the tracks -- so
-// download stops the leg instead of re-downloading each one first.
+// video -- an expired session, a risk-control block, or a --lang that matches
+// none of the tracks -- so download stops the leg instead of re-downloading each
+// one first.
 func downloadFatal(err error) bool {
-	return sessionExpired(err) || errors.Is(err, pipeline.ErrNoTrackForLang)
+	return sessionExpired(err) || riskControl(err) || errors.Is(err, pipeline.ErrNoTrackForLang)
 }
 
 func (r *runtime) downloadSubtitles(ctx context.Context, out io.Writer, lang string, formats []string, source string, onProgress func(done, total int)) (downloadStats, error) {
@@ -159,12 +162,12 @@ func (r *runtime) downloadSubtitles(ctx context.Context, out io.Writer, lang str
 		return stats, err
 	}
 
-	videos, err := st.ListVideosFiltered(store.StateDownloadable, source)
+	videos, err := listDownloadable(st, source)
 	if err != nil {
 		return stats, err
 	}
 	if len(videos) == 0 {
-		fmt.Fprintln(out, "没有可下载的字幕；先运行 probe。")
+		fmt.Fprintln(out, "没有待处理的视频；先运行 `bili-sub probe`。")
 		return stats, nil
 	}
 	client, err := r.client()
@@ -204,10 +207,23 @@ func (r *runtime) downloadSubtitles(ctx context.Context, out io.Writer, lang str
 		if abort.hit(err) {
 			return nil, err
 		}
-		// Keep the run going; a failed download is retryable after `retry`.
+		// "no subtitle" and "charging-locked" are classifications, not failures:
+		// the download step is where they are now discovered, so it records the
+		// state and leaves the run going instead of marking the row failed.
 		if ctx.Err() == nil {
-			if serr := st.SetState(v.ID, store.StateFailed, v.Lang); serr != nil {
-				err = errors.Join(err, fmt.Errorf("标记 failed: %w", serr))
+			switch {
+			case errors.Is(err, pipeline.ErrNoSubtitle):
+				if serr := st.SetState(v.ID, store.StateNoSubtitle, ""); serr != nil {
+					err = errors.Join(err, fmt.Errorf("标记 no_subtitle: %w", serr))
+				}
+			case errors.Is(err, pipeline.ErrChargingLocked):
+				if serr := st.SetState(v.ID, store.StateChargingLocked, ""); serr != nil {
+					err = errors.Join(err, fmt.Errorf("标记 charging_locked: %w", serr))
+				}
+			default:
+				if serr := st.SetState(v.ID, store.StateFailed, v.Lang); serr != nil {
+					err = errors.Join(err, fmt.Errorf("标记 failed: %w", serr))
+				}
 			}
 		}
 		return nil, err
@@ -221,6 +237,16 @@ func (r *runtime) downloadSubtitles(ctx context.Context, out io.Writer, lang str
 			// and the -101 that stopped the run is reported once below. Neither is
 			// a failure of this video.
 			if errors.Is(res.Err, context.Canceled) || downloadFatal(res.Err) {
+				continue
+			}
+			// Classifications, not failures: the download step is where "no
+			// subtitle" and "charging-locked" are discovered now.
+			if errors.Is(res.Err, pipeline.ErrNoSubtitle) {
+				stats.NoSubtitle++
+				continue
+			}
+			if errors.Is(res.Err, pipeline.ErrChargingLocked) {
+				stats.ChargingLocked++
 				continue
 			}
 			failCount++
@@ -242,7 +268,9 @@ func (r *runtime) downloadSubtitles(ctx context.Context, out io.Writer, lang str
 	stats.Failed = failCount
 	if aerr := abort.aborted(); aerr != nil {
 		var msg string
-		if errors.Is(aerr, pipeline.ErrNoTrackForLang) {
+		if riskControl(aerr) {
+			msg = "请求被 B站风控限流，已停止下载（" + aerr.Error() + "）；剩余视频保持原状态，等几分钟再重试。"
+		} else if errors.Is(aerr, pipeline.ErrNoTrackForLang) {
 			msg = "指定的字幕语言在这些视频里没有匹配的轨道，已停止下载（" + aerr.Error() + "）；剩余视频保持原状态。"
 		} else {
 			msg = "登录态失效，已停止下载（" + aerr.Error() + "）。请先运行 `bili-sub login`；剩余视频保持原状态。"
@@ -260,8 +288,33 @@ func (r *runtime) downloadSubtitles(ctx context.Context, out io.Writer, lang str
 		return stats, err
 	}
 	emit(stats.Total, stats.Total)
-	fmt.Fprintf(out, "下载完成：共 %d，成功 %d，失败 %d，输出目录 %s\n", stats.Total, okCount, failCount, dir)
+	fmt.Fprintf(out, "下载完成：共 %d，成功 %d，无字幕 %d，充电专属 %d，失败 %d，输出目录 %s\n",
+		stats.Total, okCount, stats.NoSubtitle, stats.ChargingLocked, failCount, dir)
 	return stats, nil
+}
+
+// listDownloadable collects the rows the download step owns: freshly listed
+// rows (pending) plus rows an earlier version of the pipeline already marked
+// downloadable. Listing and the subtitle check used to be one step; now a row is
+// pending until download classifies it (fetched / no_subtitle / charging_locked
+// / failed). The merge keeps a database written by the old version usable.
+func listDownloadable(st *store.Store, source string) ([]store.Video, error) {
+	var videos []store.Video
+	seen := map[int64]bool{}
+	for _, state := range []string{store.StatePending, store.StateDownloadable} {
+		list, err := st.ListVideosFiltered(state, source)
+		if err != nil {
+			return nil, err
+		}
+		for _, v := range list {
+			if seen[v.ID] {
+				continue
+			}
+			seen[v.ID] = true
+			videos = append(videos, v)
+		}
+	}
+	return videos, nil
 }
 
 // writeSubtitleFormats renders the requested formats next to the .srt that
