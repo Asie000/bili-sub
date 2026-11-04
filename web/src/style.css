@@ -75,6 +75,8 @@ select {
   border: 1px solid var(--border);
   border-radius: 6px;
   font: inherit;
+  background: var(--bg);
+  color: inherit;
 }
 
 input[type="text"] {
@@ -91,8 +93,15 @@ button {
   cursor: pointer;
 }
 
-button:hover {
+button:hover:not(:disabled) {
   filter: brightness(1.08);
+}
+
+/* A disabled button marks a run that is already in flight, so it must not look
+   clickable. */
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .checkbox {
@@ -105,6 +114,11 @@ button:hover {
 .hint {
   color: var(--muted);
   font-size: 0.9rem;
+}
+
+.status.ok {
+  color: #1a7f37;
+  font-weight: 600;
 }
 
 /* A fixed how-to line gets a quiet tinted box so it reads as guidance rather
@@ -176,6 +190,13 @@ td {
   vertical-align: top;
 }
 
+/* Column headers and every cell except the title stay on one line, so the
+   table keeps a readable grid. */
+th,
+td:not(:nth-child(2)) {
+  white-space: nowrap;
+}
+
 th {
   font-weight: 600;
 }
@@ -238,9 +259,4 @@ td.empty {
   font-family: Consolas, "Courier New", monospace;
   font-size: 0.85rem;
   white-space: pre-wrap;
-}
-
-.status.ok {
-  color: #1a7f37;
-  font-weight: 600;
 }

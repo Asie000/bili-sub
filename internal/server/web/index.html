@@ -4,93 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>bili-sub 字幕采集</title>
-<link rel="stylesheet" href="/style.css">
+  <script type="module" crossorigin src="/assets/index-CFQ9qBDC.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-D3Ukg42g.css">
 </head>
 <body>
-<header>
-  <h1>bili-sub 字幕采集</h1>
-  <div id="login-status" class="status">登录状态：未设置 SESSDATA</div>
-</header>
-
-<div id="progress-panel" class="progress-panel" hidden>
-  <span id="progress-label" class="progress-label"></span>
-  <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
-</div>
-
-<main>
-  <section class="panel login-panel">
-    <h2>登录 / Cookie</h2>
-    <input id="sessdata" type="password" autocomplete="off" placeholder="粘贴 SESSDATA 或完整 Cookie">
-    <button id="save-sessdata">保存登录信息</button>
-    <button id="qr-login">扫码登录</button>
-    <p class="hint guide">从 B站页面 F12 → 网络 → 任意请求 → 请求头 Cookie，整段复制（推荐，能避免 412）。</p>
-    <div id="qr-area" class="qr-area" hidden>
-      <img id="qr-img" alt="登录二维码" width="240" height="240">
-      <div id="qr-status" class="hint"></div>
-    </div>
-  </section>
-
-  <section class="panel">
-    <h2>来源</h2>
-    <div class="row">
-      <select id="kind">
-        <option value="">自动识别</option>
-        <option value="single">单个视频</option>
-        <option value="space">UP主主页</option>
-        <option value="fav">收藏夹</option>
-        <option value="season">合集</option>
-        <option value="search">搜索关键词</option>
-      </select>
-      <input id="url" type="text" placeholder="视频(BV/av/b23.tv) / UP主 / 收藏夹 / 合集 链接；选「搜索关键词」时填关键词">
-      <button id="probe">获取视频列表</button>
-    </div>
-    <div class="row">
-      <label for="lang">字幕语言</label>
-      <select id="lang">
-        <option value="">默认</option>
-        <option value="zh">中文</option>
-        <option value="en">英文</option>
-      </select>
-      <label class="checkbox"><input id="transcribe" type="checkbox"> 无字幕时转写</label>
-      <label for="asr-lang">转写语言</label>
-      <select id="asr-lang" title="本地 ASR 的转写语言，仅在勾选转写时生效">
-        <option value="zh">中文</option>
-        <option value="en">英文</option>
-        <option value="">自动检测</option>
-      </select>
-      <input id="asr-model" type="text" size="14" placeholder="模型（默认按 .env）" title="Whisper 模型名；留空则用 .env 的 ASR_MODEL，都没有则用 worker 默认">
-      <button id="download">获取字幕</button>
-      <button id="transcribe-only">转写无字幕</button>
-      <button id="export">导出</button>
-      <label class="checkbox"><input type="checkbox" id="include-exported"> 包含已导出的</label>
-      <button id="refresh">刷新</button>
-      <button id="clear-data">清空</button>
-      <label class="checkbox"><input type="checkbox" id="force-probe"> 重新获取已完成的</label>
-    </div>
-  </section>
-
-  <section class="panel">
-    <h2>视频列表 <span id="stats" class="hint"></span></h2>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>序号</th><th>标题</th><th>作者</th><th>发布日期</th>
-            <th>字幕状态</th><th>字幕语言</th><th>是否充电</th>
-          </tr>
-        </thead>
-        <tbody id="videos-body"></tbody>
-      </table>
-    </div>
-    <div class="pager"><button id="page-prev">上一页</button><span id="page-info" class="hint"></span><button id="page-next">下一页</button></div>
-  </section>
-
-  <section class="panel">
-    <h2>进度</h2>
-    <pre id="log" class="log"></pre>
-  </section>
-</main>
-
-<script src="/app.js"></script>
+<div id="app"></div>
 </body>
 </html>

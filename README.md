@@ -35,6 +35,7 @@
 | 操作系统 | Windows 10/11（主要开发和验证平台）；Linux/macOS 理论上可用，命令里的 `.exe` 改成无后缀即可 |
 | Go | **1.27 或更新**（`go.mod` 要求）；只有从源码编译才需要 |
 | Python | **3.9–3.12**，仅本地转写需要；3.13+ 通常没有 faster-whisper 预编译包 |
+| Node | **20 或更新**，仅修改网页界面时需要；只运行工具不需要 |
 | uv 或 pip | 用来建 Python 虚拟环境，任选 |
 | 磁盘 | 字幕很小；模型缓存约 0.5–3 GB（按模型大小）；临时音频每条几 MB 到几十 MB，转写完自动删 |
 | GPU | 可选。NVIDIA + CUDA 运行库会走 `cuda/float16`，否则自动降级 `cpu/int8` |
@@ -51,6 +52,20 @@ go build -o bili-sub.exe ./cmd/bili-sub
 ```
 
 编译产物是单个 `bili-sub.exe`，网页也内嵌在里面，不需要 Node、不需要再带静态文件。
+
+网页是 Vue 3 + Vite 写的，源码在 `web/`，构建产物已提交到 `internal/server/web/`。
+所以只有**改界面**时才需要 Node：
+
+```powershell
+cd web
+npm install
+npm run build     # 产出到 ../internal/server/web/
+cd ..
+go build -o bili-sub.exe ./cmd/bili-sub
+```
+
+改界面时还可以 `npm run dev`（Vite 开发服务器会把 `/api` 转发到 `127.0.0.1:8080`，
+一边改一边热更新），但那个模式下要先跑着 `bili-sub serve`。
 
 也可以不编译直接跑：
 
@@ -479,6 +494,9 @@ BiliBili/
 │   ├── transcribe_worker.py   # faster-whisper 常驻 worker（Go 版用）
 │   └── test_transcribe_worker.py
 ├── python/                    # Python 完整实现（CLI + Web + 进程内 ASR）
+├── web/                       # Vue 3 + Vite 前端源码（改界面才需要 Node）
+│   ├── src/lib/               # API 调用、全局状态、SSE 订阅
+│   └── src/components/        # 登录、来源、视频表格、进度条、日志
 ├── browser-extension/         # 浏览器插件（可选）
 └── data/                      # 运行产物（gitignore）
 ```
@@ -488,4 +506,4 @@ BiliBili/
 ## 说明
 
 - 本项目只抓取你有权限访问的字幕/音频，请在遵守 B 站用户协议与版权规定的前提下使用。
-- `.env`、`data/`、`.asr-venv/`、`*.exe` 都不进 Git；分享代码前不用手动清理。
+- `.env`、`data/`、`.asr-venv/`、`*.exe`、`web/node_modules/` 都不进 Git；分享代码前不用手动清理。

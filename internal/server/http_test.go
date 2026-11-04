@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -990,14 +991,27 @@ func TestEmbeddedUIFixesExportToTxt(t *testing.T) {
 	s := newTestServer(t, Options{})
 
 	index := serve(t, s, http.MethodGet, "/", "").Body.String()
-	app := serve(t, s, http.MethodGet, "/app.js", "").Body.String()
 
-	if !strings.Contains(app, `return ["txt"]`) {
-		t.Error("app.js should fix the export format to txt")
-	}
 	if strings.Contains(index, "export-format") {
 		t.Error("index.html should no longer offer export format checkboxes")
 	}
+	// The page is a bundled Vue app, so the format decision lives inside the
+	// bundle under a content-hashed name. Follow the script index.html loads
+	// instead of naming the file, which would need editing on every rebuild.
+	bundle := bundleScript(t, s, index)
+	if !strings.Contains(bundle, "txt") {
+		t.Error("the bundle should fix the export format to txt")
+	}
+}
+
+// bundleScript returns the body of the script index.html loads.
+func bundleScript(t *testing.T, s *Server, index string) string {
+	t.Helper()
+	m := regexp.MustCompile(`src="(/assets/[^"]+\.js)"`).FindStringSubmatch(index)
+	if m == nil {
+		t.Fatalf("index.html references no bundled script: %s", index)
+	}
+	return serve(t, s, http.MethodGet, m[1], "").Body.String()
 }
 
 func TestLoginStatusEndpoint(t *testing.T) {
