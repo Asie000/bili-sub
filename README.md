@@ -156,7 +156,8 @@ BILI_CONCURRENCY=3
 .\bili-sub.exe serve
 ```
 
-然后打开 <http://127.0.0.1:8080>。
+启动后会自动用 **Chrome** 打开页面（没装 Chrome 则用系统默认浏览器）。
+不想自动打开就加 `--no-open`，然后手动访问 <http://127.0.0.1:8080>。
 
 ---
 
@@ -226,7 +227,7 @@ BILI_CONCURRENCY=3
 | `status` | 打印视频状态表 | `--state pending/failed/...` |
 | `retry` | 把 `failed` 重置回 `pending` | — |
 | `reset` | 清空整个数据目录 | `--yes`（必须） |
-| `serve` | 启动网页界面 | `--addr 127.0.0.1:8080` |
+| `serve` | 启动网页界面 | `--addr 127.0.0.1:8080`、`--no-open` |
 | `login` | 保存登录信息 | `--qr` / `--cookie` / `--sessdata` |
 
 典型的手动流程：

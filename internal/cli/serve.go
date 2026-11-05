@@ -60,16 +60,49 @@ func newServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			noOpen, err := cmd.Flags().GetBool("no-open")
+			if err != nil {
+				return err
+			}
 			rt, err := newRuntime(cmd)
 			if err != nil {
 				return err
 			}
 			defer rt.close()
+			if !noOpen {
+				go openWhenReady(cmd.Context(), cmd.OutOrStdout(), serveURL(addr))
+			}
 			return rt.serve(cmd.Context(), cmd.OutOrStdout(), addr)
 		},
 	}
 	cmd.Flags().String("addr", "127.0.0.1:8080", "监听地址；默认只监听本机。填 :8080 则整个局域网都能访问，而服务没有任何鉴权")
+	cmd.Flags().Bool("no-open", false, "启动后不自动打开浏览器（默认用 Chrome 打开，没装则用系统默认浏览器）")
 	return cmd
+}
+
+// serveURL turns a listen address into the URL the startup message prints and
+// the browser is pointed at. A bare ":8080" has no host to connect to, so it is
+// shown as localhost instead of as the literal address.
+func serveURL(addr string) string {
+	host := addr
+	if strings.HasPrefix(host, ":") {
+		host = "localhost" + host
+	}
+	return "http://" + host
+}
+
+// openWhenReady hands the URL to the browser once the listener has had time to
+// come up. A fixed short delay is enough on loopback and, unlike a polling loop,
+// cannot itself wedge.
+func openWhenReady(ctx context.Context, out io.Writer, url string) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := openBrowser(url); err != nil {
+		fmt.Fprintf(out, "没能自动打开浏览器（%v），请手动访问 %s\n", err, url)
+	}
 }
 
 // serve wires the store and the pipeline seams into the HTTP server. It returns
@@ -88,11 +121,8 @@ func (r *runtime) serve(ctx context.Context, out io.Writer, addr string) error {
 	hub := server.NewHub()
 	srv := server.New(r.serveOptions(st, hub))
 
-	display := addr
-	if strings.HasPrefix(display, ":") {
-		display = "localhost" + display
-	}
-	fmt.Fprintf(out, "Web 界面已启动：http://%s（Ctrl+C 退出）\n", display)
+	display := serveURL(addr)
+	fmt.Fprintf(out, "Web 界面已启动：%s（Ctrl+C 退出）\n", display)
 
 	httpSrv := &http.Server{
 		Addr:              addr,
