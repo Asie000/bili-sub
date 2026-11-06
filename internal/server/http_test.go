@@ -998,9 +998,13 @@ func TestEmbeddedUIFixesExportToTxt(t *testing.T) {
 	// The page is a bundled Vue app, so the format decision lives inside the
 	// bundle under a content-hashed name. Follow the script index.html loads
 	// instead of naming the file, which would need editing on every rebuild.
+	//
+	// The needle is the array literal, not the word "txt": Vue itself ships
+	// Symbol.for("v-txt"), so a bare "txt" stayed true even after the export
+	// format was changed, and the assertion silently stopped meaning anything.
 	bundle := bundleScript(t, s, index)
-	if !strings.Contains(bundle, "txt") {
-		t.Error("the bundle should fix the export format to txt")
+	if !strings.Contains(bundle, `["txt"]`) {
+		t.Error(`the bundle should fix the export format to ["txt"]`)
 	}
 }
 
