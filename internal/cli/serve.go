@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -69,9 +70,7 @@ func newServeCmd() *cobra.Command {
 				return err
 			}
 			defer rt.close()
-			if !noOpen {
-				go openWhenReady(cmd.Context(), cmd.OutOrStdout(), serveURL(addr))
-			}
+			rt.openPage = !noOpen
 			return rt.serve(cmd.Context(), cmd.OutOrStdout(), addr)
 		},
 	}
@@ -81,38 +80,31 @@ func newServeCmd() *cobra.Command {
 }
 
 // serveURL turns a listen address into the URL the startup message prints and
-// the browser is pointed at. A bare ":8080" has no host to connect to, so it is
-// shown as localhost instead of as the literal address.
+// the browser is pointed at. A bare ":8080" has no host to connect to, and a
+// wildcard bind names an address no browser will open, so both are shown as
+// loopback instead of as the literal address.
 func serveURL(addr string) string {
 	host := addr
-	if strings.HasPrefix(host, ":") {
+	switch {
+	case strings.HasPrefix(host, ":"):
 		host = "localhost" + host
+	case strings.HasPrefix(host, "0.0.0.0:"):
+		host = "localhost:" + strings.TrimPrefix(host, "0.0.0.0:")
+	case strings.HasPrefix(host, "[::]:"):
+		host = "localhost:" + strings.TrimPrefix(host, "[::]:")
 	}
 	return "http://" + host
-}
-
-// openWhenReady hands the URL to the browser once the listener has had time to
-// come up. A fixed short delay is enough on loopback and, unlike a polling loop,
-// cannot itself wedge.
-func openWhenReady(ctx context.Context, out io.Writer, url string) {
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(300 * time.Millisecond):
-	}
-	if err := openBrowser(url); err != nil {
-		fmt.Fprintf(out, "没能自动打开浏览器（%v），请手动访问 %s\n", err, url)
-	}
 }
 
 // serve wires the store and the pipeline seams into the HTTP server. It returns
 // when the listener fails or when the process is asked to stop (ctx, which
 // main cancels on Ctrl+C).
 //
-// Stopping on request is why this no longer calls http.ListenAndServe directly:
-// once Ctrl+C cancels a context instead of killing the process, a bare
+// Stopping on request is why this no longer calls http.ListenAndServe: once
+// Ctrl+C cancels a context instead of killing the process, a bare
 // ListenAndServe would leave a server that ignores the very key its own startup
-// message tells the user to press.
+// message tells the user to press. Listening separately also gives the caller a
+// point where the port is known to be up, which is what openPage waits for.
 func (r *runtime) serve(ctx context.Context, out io.Writer, addr string) error {
 	st, err := r.store()
 	if err != nil {
@@ -121,9 +113,6 @@ func (r *runtime) serve(ctx context.Context, out io.Writer, addr string) error {
 	hub := server.NewHub()
 	srv := server.New(r.serveOptions(st, hub))
 
-	display := serveURL(addr)
-	fmt.Fprintf(out, "Web 界面已启动：%s（Ctrl+C 退出）\n", display)
-
 	httpSrv := &http.Server{
 		Addr:              addr,
 		Handler:           srv.Handler(),
@@ -131,10 +120,25 @@ func (r *runtime) serve(ctx context.Context, out io.Writer, addr string) error {
 		ReadTimeout:       serveReadTimeout,
 		IdleTimeout:       serveIdleTimeout,
 	}
-	// ListenAndServe blocks, so the shutdown path below needs the error value
-	// in hand before it can pick it up.
+	// Listen before announcing anything: a port that is already taken has to
+	// fail the command, not point a browser tab at whatever else owns it.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	display := serveURL(addr)
+	fmt.Fprintf(out, "Web 界面已启动：%s（Ctrl+C 退出）\n", display)
+	if r.openPage {
+		// Only now, because the listener is accepting: a tab opened earlier can
+		// land on a connection-refused page.
+		if err := openBrowser(display); err != nil {
+			fmt.Fprintf(out, "没能自动打开浏览器（%v），请手动访问 %s\n", err, display)
+		}
+	}
+	// Serve blocks, so the shutdown path below needs the error value in hand
+	// before it can pick it up.
 	errCh := make(chan error, 1)
-	go func() { errCh <- httpSrv.ListenAndServe() }()
+	go func() { errCh <- httpSrv.Serve(ln) }()
 
 	select {
 	case err := <-errCh:

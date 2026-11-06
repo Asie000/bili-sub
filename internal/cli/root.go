@@ -65,6 +65,12 @@ type runtime struct {
 	// two run at once would multiply the request rate the limiter exists to
 	// cap.
 	opMu sync.Mutex
+
+	// openPage asks serve to hand the page URL to a browser once the listener
+	// is accepting connections. It is a field rather than a serve parameter so
+	// tests and other non-interactive callers leave it false and never launch a
+	// browser.
+	openPage bool
 }
 
 func newRuntime(cmd *cobra.Command) (*runtime, error) {
