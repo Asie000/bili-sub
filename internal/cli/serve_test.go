@@ -281,7 +281,10 @@ func TestServeStopsWhenTheProcessIsAskedToStop(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := executeContextOut(t, ctx, "serve", "--addr", "127.0.0.1:0")
+		// --no-open is not optional here: without it serve hands the URL to a
+		// browser, so every run of this package would launch one (a real Chrome
+		// window on Windows). This test is about the shutdown, not the browser.
+		_, err := executeContextOut(t, ctx, "serve", "--addr", "127.0.0.1:0", "--no-open")
 		done <- err
 	}()
 
