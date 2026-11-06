@@ -70,7 +70,11 @@ export function connectEvents() {
         }
         break;
       case "reset":
-        // Another page cleared the store; reload whatever this page is showing.
+        // Another page cleared the store: reload whatever this page is showing.
+        // The offset goes back to the first page, because the rows it pointed
+        // at no longer exist and the fallback below would otherwise have to
+        // walk back one request at a time.
+        state.offset = 0;
         loadVideos();
         break;
     }

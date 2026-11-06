@@ -30,10 +30,10 @@ export const state = reactive({
   logs: [],
   progress: { visible: false, label: "", percent: 0 },
   login: { text: "登录状态：未设置 SESSDATA", ok: false },
-  qr: { visible: false, png: "", status: "" },
+  qr: { visible: false, png: "", status: "", pending: false },
   // One flag per long-running operation: the button that starts an operation is
   // disabled while it runs, so a second click cannot start the same run twice.
-  busy: { probe: false, download: false, transcribe: false, export: false },
+  busy: { probe: false, download: false, transcribe: false, export: false, login: false },
 });
 
 export function log(message) {
@@ -88,28 +88,57 @@ function updatePager() {
   state.pager.canNext = state.offset + PAGE_SIZE < total;
 }
 
+// loadSeq numbers the list requests. Only the newest one may write the table:
+// a slow answer for page 1 must not land on top of a fresh page 2, which would
+// render rows from one page with 序号 from another.
+let loadSeq = 0;
+
 export async function loadVideos() {
+  const seq = ++loadSeq;
+  // The page this request is for, frozen: state.offset can move while the
+  // answer is in flight.
+  const offset = state.offset;
   try {
     // The list accumulates every probed source on purpose: this is a batch
     // collector, so a new probe appends instead of replacing. 清空数据 resets it.
     const params = new URLSearchParams();
-    params.set("offset", String(state.offset));
+    params.set("offset", String(offset));
     params.set("limit", String(PAGE_SIZE));
     const data = await api(`/api/videos?${params.toString()}`);
+    if (seq !== loadSeq) {
+      return;
+    }
     state.total = data.total;
-    // The filter can change under us (清空数据, a remote reset). If the current
+    const items = Array.isArray(data.items) ? data.items : [];
+    // The filter can change under us (清空数据, a remote reset). If the requested
     // page is now past the end, fall back to the last real page instead of
     // rendering an empty table with a reversed range.
-    if (data.items.length === 0 && state.total > 0 && state.offset > 0) {
-      state.offset = Math.floor((state.total - 1) / PAGE_SIZE) * PAGE_SIZE;
-      return loadVideos();
+    if (items.length === 0 && state.total > 0 && offset > 0) {
+      const lastOffset = Math.floor((state.total - 1) / PAGE_SIZE) * PAGE_SIZE;
+      // One step back at most. Retrying the same offset would ask forever: the
+      // server counts rows and lists them in two separate statements, so it can
+      // report a total whose last page it then hands back empty.
+      if (lastOffset !== offset) {
+        state.offset = lastOffset;
+        return loadVideos();
+      }
+      state.videos = [];
+      updatePager();
+      log(`列表对不上：服务端报告共 ${state.total} 条，但第 ${offset + 1} 条起是空的，已停在这里。点「刷新」重试。`);
+      return;
     }
-    state.videos = data.items || [];
+    state.videos = items;
     updatePager();
     await loadStats();
   } catch (err) {
+    if (seq !== loadSeq) {
+      return;
+    }
     log(`读取视频列表失败：${err.message}`);
+    // Forget the old page entirely, so the empty table and the pager agree.
     state.videos = [];
+    state.total = 0;
+    updatePager();
   }
 }
 
@@ -268,14 +297,22 @@ export async function saveSessdata() {
     log("请先粘贴 SESSDATA 或完整 Cookie。");
     return;
   }
-  const body = looksLikeCookie(value) ? { cookie: value } : { sessdata: value };
+  // One save at a time: two in flight would write the session file twice, and
+  // the written file is only replaced by truncate-and-write, not by a rename.
+  if (state.busy.login) {
+    return;
+  }
+  state.busy.login = true;
   try {
+    const body = looksLikeCookie(value) ? { cookie: value } : { sessdata: value };
     await post("/api/login/sessdata", body);
     state.form.sessdata = "";
     state.login.text = "登录状态：已保存登录信息";
     log("登录信息已保存。");
   } catch (err) {
     log(`保存登录信息失败：${err.message}`);
+  } finally {
+    state.busy.login = false;
   }
 }
 
@@ -284,19 +321,49 @@ export async function saveSessdata() {
 // The poll also makes the state survive a page refresh.
 let qrPollTimer = null;
 
+// qrStartedAt bounds the poll the way the server bounds its own goroutine
+// (qrLoginTimeout, 5 minutes): after that the code is long expired and nothing
+// should keep asking.
+const QR_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+let qrStartedAt = 0;
+
 function startQRStatusPolling() {
-  stopQRStatusPolling();
-  qrPollTimer = setInterval(loadLoginStatus, 2000);
+  // Replace any running timer without touching state.qr.pending, which is what
+  // the caller just set: only stopQRStatusPolling ends a scan attempt.
+  if (qrPollTimer) {
+    clearInterval(qrPollTimer);
+  }
+  qrStartedAt = Date.now();
+  qrPollTimer = setInterval(() => {
+    if (Date.now() - qrStartedAt > QR_LOGIN_TIMEOUT_MS) {
+      state.qr.status = "二维码已过期，请重新点「扫码登录」。";
+      state.qr.visible = false;
+      stopQRStatusPolling();
+      return;
+    }
+    loadLoginStatus();
+  }, 2000);
 }
 
+// stopQRStatusPolling ends a scan attempt: it stops the poll and re-enables the
+// button. Every way an attempt can end goes through here (success, failure,
+// expiry), so state.qr.pending cannot be left stuck.
 function stopQRStatusPolling() {
   if (qrPollTimer) {
     clearInterval(qrPollTimer);
     qrPollTimer = null;
   }
+  state.qr.pending = false;
 }
 
 export async function qrLogin() {
+  // One waiting scan at a time: every extra call leaves a 5-minute background
+  // poll on the server, each spending its own request budget and each able to
+  // overwrite the saved session.
+  if (state.qr.pending) {
+    return;
+  }
+  state.qr.pending = true;
   try {
     const result = await api("/api/login/qrcode");
     state.qr.visible = true;
@@ -306,6 +373,7 @@ export async function qrLogin() {
     startQRStatusPolling();
   } catch (err) {
     state.qr.visible = false;
+    state.qr.pending = false;
     log(`获取二维码失败：${err.message}`);
   }
 }

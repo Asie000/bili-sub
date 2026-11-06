@@ -59,10 +59,13 @@ go build -o bili-sub.exe ./cmd/bili-sub
 ```powershell
 cd web
 npm install
+npm test          # 列表逻辑的单元测试，用 Node 自带的 runner，不装额外依赖
 npm run build     # 产出到 ../internal/server/web/
 cd ..
 go build -o bili-sub.exe ./cmd/bili-sub
 ```
+
+构建产物入库，所以**改完界面必须重新 `npm run build` 才能提交**：忘了这一步，`go build` 出来的网页还是旧版本，而测试不会报错。
 
 改界面时还可以 `npm run dev`（Vite 开发服务器会把 `/api` 转发到 `127.0.0.1:8080`，
 一边改一边热更新），但那个模式下要先跑着 `bili-sub serve`。

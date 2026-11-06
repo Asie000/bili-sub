@@ -12,8 +12,8 @@ import { qrLogin, saveSessdata, state } from "../lib/store.js";
         autocomplete="off"
         placeholder="粘贴 SESSDATA 或完整 Cookie"
       />
-      <button type="button" @click="saveSessdata">保存登录信息</button>
-      <button type="button" @click="qrLogin">扫码登录</button>
+      <button type="button" :disabled="state.busy.login" @click="saveSessdata">保存登录信息</button>
+      <button type="button" :disabled="state.qr.pending" @click="qrLogin">扫码登录</button>
     </div>
     <p class="hint guide">
       从 B站页面 F12 → 网络 → 任意请求 → 请求头 Cookie，整段复制（推荐，能避免 412）。
