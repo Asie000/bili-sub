@@ -6,8 +6,8 @@ import (
 	"net/http"
 )
 
-// webDir is the embedded browser UI (Ruling B: it lives under
-// internal/server/web, there is no top-level web/ directory).
+// webDir is the embedded browser UI: the build output of the Vue source in the
+// repository's top-level web/ directory, not hand-written files.
 //
 // The directory is the build output of web/ (Vue + Vite), and the output is
 // committed: running the tool needs only `go build`, while changing the
