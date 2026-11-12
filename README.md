@@ -47,7 +47,7 @@
 ### 1. 获取代码并编译
 
 ```powershell
-cd C:\Users\lsy1\Desktop\BiliBili
+cd D:\AAA_CodeRepo\BiliBili   # 换成你自己的项目目录
 go build -o bili-sub.exe ./cmd/bili-sub
 ```
 
@@ -85,7 +85,7 @@ go run ./cmd/bili-sub --help
 **方式 A：uv（推荐）**
 
 ```powershell
-cd C:\Users\lsy1\Desktop\BiliBili
+cd D:\AAA_CodeRepo\BiliBili
 uv venv --python 3.12 .asr-venv
 uv pip install --python .asr-venv\Scripts\python.exe faster-whisper "av<19"
 ```
@@ -93,7 +93,7 @@ uv pip install --python .asr-venv\Scripts\python.exe faster-whisper "av<19"
 **方式 B：系统 Python + venv**
 
 ```powershell
-cd C:\Users\lsy1\Desktop\BiliBili
+cd D:\AAA_CodeRepo\BiliBili
 py -3.12 -m venv .asr-venv
 .\.asr-venv\Scripts\python.exe -m pip install -U pip
 .\.asr-venv\Scripts\python.exe -m pip install faster-whisper "av<19"
@@ -125,8 +125,9 @@ Copy-Item .env.example .env
 `.env` 内容示例：
 
 ```dotenv
-# 本地 ASR 的 Python 解释器（绝对路径最稳；相对路径按「当前工作目录」解析）
-PYTHON_PATH=C:\Users\lsy1\Desktop\BiliBili\.asr-venv\Scripts\python.exe
+# 本地 ASR 的 Python 解释器。相对路径先按当前目录找，找不到再按 bili-sub.exe
+# 所在目录找，所以 venv 跟着项目移动时不用改这一行。也可以写绝对路径。
+PYTHON_PATH=.asr-venv\Scripts\python.exe
 
 # 转写模型。留空/注释掉 = worker 默认 small；有 GPU 推荐 large-v3-turbo
 ASR_MODEL=large-v3-turbo

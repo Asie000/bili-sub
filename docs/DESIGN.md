@@ -93,7 +93,7 @@
 | **命令行交互** | `spf13/cobra` | 子命令、帮助与参数校验 |
 | **音频抽取处理** | **不需要 ffmpeg**：PyAV 自带解码器，直接喂 `.m4s` | 省一次转码 + 一次落盘（一小时 wav 约 115MB） |
 | **本地 ASR 引擎** | **faster-whisper**（已实现）；SenseVoice / whisper.cpp 预留未实现 | 复用成熟的 C++/CUDA 内核 |
-| **前端看板** | 原生 HTML/CSS/JS（`embed.FS` 内嵌），未上 Vue | 页面只有一张表加几个控件，引入构建链收益不大 |
+| **前端看板** | **Vue 3 + Vite**，源码在 `web/`，构建产物提交到 `internal/server/web/` 并由 `embed.FS` 内嵌 | 表格、登录、来源、日志、进度已拆成多个组件并共享状态，原生 HTML + 字符串拼接撑不住了；构建产物入库，所以只有改界面才需要 Node |
 
 ---
 
@@ -157,7 +157,7 @@
 - [x] **Task 5.2**：`net/http` 服务：登录、列表、下载、转写、导出、SSE、任务列表。
   - 默认只监听 `127.0.0.1:8080`：服务**没有任何鉴权**，全网卡可达必须显式选（`--addr :8080`）。
   - 只收 JSON 体（`Content-Type: application/json`），挡掉「随便一个网页往本机 POST」。
-- [x] **Task 5.3**：原生页面 + `embed.FS` 单文件打包。
+- [x] **Task 5.3**：Vue 3 页面 + `embed.FS` 单文件打包（最初是原生 HTML/CSS/JS，后重写为 Vue 3）。
 
 ---
 

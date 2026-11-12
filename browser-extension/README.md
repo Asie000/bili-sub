@@ -11,21 +11,28 @@
 
 ## 火狐 Firefox 安装步骤
 
-1. 地址栏打开 `about:debugging#/runtime/this-firefox`。
-2. 点击「临时载入附加组件…」。
-3. 选择本目录下的 `manifest.json` 文件。
-4. 完成后，工具栏会出现「bili-sub 桥接」图标。
+1. 先把火狐清单覆盖成 `manifest.json`（在 `browser-extension` 目录里执行）：
+
+   ```powershell
+   Copy-Item manifest.firefox.json manifest.json -Force
+   ```
+
+2. 地址栏打开 `about:debugging#/runtime/this-firefox`。
+3. 点击「临时载入附加组件…」。
+4. 选择本目录下的 `manifest.json` 文件。
+5. 完成后，工具栏会出现「bili-sub 桥接」图标。
 
 > 说明：这样临时载入的插件在**火狐重启后会失效**，需要重新按上面步骤载入一次。
 > 想长期保留必须把插件签名（提交到 addons.mozilla.org）后再安装。
 >
-> 这里的 `manifest.json` 已经是**火狐专用**版本，直接载入即可，无需改名。
+> 仓库里的 `manifest.json` 默认是 **Chrome/Edge 版**（`background.service_worker`）。
+> 火狐不支持这个键，只认 `background.scripts`：装上去看着没事，但后台脚本不会启动，
+> 点图标没反应。所以第 1 步必须换成 `manifest.firefox.json`。
 
 ## Chrome / Edge 安装步骤
 
-> 本目录的 `manifest.json` 是火狐版本，Chrome 不认 `background.scripts`。
-> 用 Chrome/Edge 时请先把 `manifest.chrome.json` 复制成 `manifest.json`（覆盖原文件），
-> 再按下面步骤加载。
+> 本目录的 `manifest.json` 就是 Chrome/Edge 版本，直接用，不需要改名。
+> （如果之前为了火狐把它覆盖过，用 `Copy-Item manifest.chrome.json manifest.json -Force` 换回来。）
 
 1. 地址栏打开 `chrome://extensions`（Edge 为 `edge://extensions`）。
 2. 打开右上角的「开发者模式」。
@@ -55,7 +62,8 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| `manifest.json` | 火狐清单（`background.scripts`）。 |
-| `manifest.chrome.json` | Chrome/Edge 清单（`background.service_worker`）；用前覆盖 `manifest.json`。 |
+| `manifest.json` | Chrome/Edge 清单（`background.service_worker`），仓库里默认就是它。 |
+| `manifest.chrome.json` | 同一份 Chrome/Edge 清单，用来把覆盖过的 `manifest.json` 换回来。 |
+| `manifest.firefox.json` | 火狐清单（`background.scripts`）；用前覆盖 `manifest.json`。 |
 | `background.js` | 取当前页 URL 与 Cookie，POST 给本地工具，更新徽标。 |
 | `popup.html` / `popup.js` | 图标弹窗：显示最近一次结果与端口设置。 |

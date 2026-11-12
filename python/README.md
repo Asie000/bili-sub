@@ -7,7 +7,8 @@ B站字幕批量采集 + 本地 **faster-whisper** 转写，Python 完整实现�
 - 支持同样的来源：单视频 / UP主空间 / 收藏夹 / 合集 / 搜索
 - 同样的四种导出格式：`srt` / `txt` / `md` / `json`
 - 同样的 `.env`、`data/` 目录和 SQLite 表结构
-- 同样的 Web API 和网页（复用原 `index.html` / `app.js` / `style.css`）
+- 同样的 Web API；网页是自带的一份原生页面（`python/bili_sub/server/web/`），
+  与 Go 版现在的 Vue 3 界面功能相近，但不再是同一份文件
 - 转写直接在进程内调用 faster-whisper，没有 Go 版的 Python worker 子进程
 
 > 两个版本不要同时对同一个 `data/` 目录写（SQLite 单文件）。切换版本前先停掉另一个。
@@ -147,7 +148,9 @@ bili-sub-py serve --addr 127.0.0.1:8081
 
 打开 <http://127.0.0.1:8080>。
 
-- 与 Go 版共用同一个前端页面和 API（`/api/videos`、`/api/probe`、`/api/download`、`/api/transcribe`、`/api/export`、`/api/events` 等）。
+- API 与 Go 版完全一致（`/api/videos`、`/api/probe`、`/api/download`、`/api/transcribe`、`/api/export`、`/api/events` 等）。
+- 网页是 `python/bili_sub/server/web/` 里的一份原生 HTML/CSS/JS；Go 版已换成 Vue 3（源码在根目录 `web/`），两边界面相近但不是同一份文件，改一边不会同步到另一边。
+- `serve` **不会自动打开浏览器**，需要自己点地址（Go 版会自动开 Chrome，并且有 `--no-open`）。
 - 默认只监听本机；服务没有鉴权，局域网/公网部署请自行加反向代理和访问控制。
 - `serve --addr :8080` 会监听所有网卡。
 - API 只接受 `Content-Type: application/json` 的 POST。

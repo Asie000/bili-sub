@@ -1,4 +1,5 @@
 .superpowers/
+.openidea/
 data/
 .asr-venv/
 .env
