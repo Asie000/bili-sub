@@ -50,7 +50,7 @@ type Enumerator struct {
 	SearchBaseURL string
 	NavURL        string
 
-	signer        *bili.WBISigner
+	signer *bili.WBISigner
 	// Workers is how many listing bvids are resolved (the per-video view call)
 	// at once. Listings carry no cid, so every source resolves one per bvid; doing
 	// that serially stacked each request's latency on top of the rate limiter's
